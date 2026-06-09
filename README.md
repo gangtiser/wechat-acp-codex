@@ -49,11 +49,46 @@ wechat-acp-codex owner clear   # 清除当前 owner
 wechat-acp-codex owner show    # 查看当前 owner id
 ```
 
+> **日常使用提示**：首次用前台启动方便扫码；之后建议加 `--daemon` 在后台运行。经常用的话全局装一次更省事 —— `npm i -g wechat-acp-codex`，装好后下文命令都可以把 `npx -y wechat-acp-codex@latest` 直接写成 `wechat-acp-codex`。
+
 ## 单实例接管
 
 同一个微信账号同一时间只会有一个 live bridge。你在另一个项目目录里再次启动 `wechat-acp-codex` 时，新进程会接管这个微信账号，旧进程会自动退出。
 
 这意味着：你在微信里对话的项目，始终是最后一次启动 `wechat-acp-codex` 的项目目录。
+
+## 在多个项目间切换（日常使用）
+
+切换很简单 —— **在哪个项目目录里启动，微信就对哪个项目**；要换项目，直接在新项目里启动即可，旧实例会被自动接管退出。
+
+```bash
+# 对项目 A
+cd ~/code/project-a
+wechat-acp-codex --allow-first --daemon
+
+# 切到项目 B —— 直接在新项目启动，A 会自动退出
+cd ~/code/project-b && wechat-acp-codex --daemon
+# 或不用 cd，直接指定目录：
+wechat-acp-codex --cwd ~/code/project-b --daemon
+```
+
+**建议始终加 `--daemon`**：登录后转入后台运行，关掉终端也不受影响；也避免误用 `Ctrl-Z` 把进程挂起 —— 挂起的进程既无法被接管、也无法被 `stop` 终止。
+
+查看状态、停止后台：
+
+```bash
+wechat-acp-codex status   # 在不在跑、当前对着哪个项目
+wechat-acp-codex stop     # 停掉后台 daemon（会自动释放锁）
+```
+
+**卡住时的清理**（极少数情况：进程被 `Ctrl-Z` 挂起、`stop` 失效、或残留锁文件导致启动时报 `lock held by ...`）：
+
+```bash
+pkill -9 -f "wechat-acp-codex.js"; pkill -9 -f "wechat-acp-codex@latest"
+rm -f ~/.wechat-acp-codex/wechat.lock
+```
+
+> 想**同时**挂多个项目，单账号做不到（接管机制），需要多个微信账号并用 `--instance <名字>` 隔离 —— 见下文「运行多个实例」。此时 `status`/`stop`/`owner` 都要带上 `--instance <名字>`，锁文件路径为 `~/.wechat-acp-codex/instances/<名字>/wechat.lock`。
 
 ## 可选：`codex wechat` 快捷入口
 
