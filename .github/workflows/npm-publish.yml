@@ -1,4 +1,5 @@
-# Publish the npm package on GitHub Release, plus per-push prereleases from main.
+# Publish the npm package on GitHub Release or `v*` tag push, plus per-push
+# prereleases from main.
 #
 # Uses npm trusted publishing (OIDC) via `--provenance`, so no NPM_TOKEN is
 # required in the repo secrets. The maintainer must register this workflow
@@ -11,7 +12,7 @@
 #
 # Two jobs share the same workflow filename (and therefore the same trusted
 # publisher entry — npm's web UI only allows one entry per package):
-#   - publish-release: on GitHub Release `created`, publishes to dist-tag `latest`
+#   - publish-release: on GitHub Release `created` or `v*` tag push, publishes to dist-tag `latest`
 #   - publish-next:    on push to `main`, publishes a `<version>-next.<ts>.<sha>`
 #                      prerelease to dist-tag `next`
 #
@@ -26,18 +27,19 @@ on:
     types: [created]
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
   # Serialize publishes per channel so a fast follow-up push can't race ahead
   # of an in-flight publish. Release publishes get their own group keyed on
   # the release tag so they never block / get blocked by next publishes.
-  group: npm-publish-${{ github.event_name == 'release' && github.event.release.tag_name || 'next' }}
+  group: npm-publish-${{ (github.event_name == 'release' && github.event.release.tag_name) || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || 'next' }}
   cancel-in-progress: false
 
 jobs:
   publish-release:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,7 +55,7 @@ jobs:
       - run: npm install -g npm@latest && npm -v
       - name: Verify package.json version matches release tag
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
         run: |
           pkg_version="$(node -p "require('./package.json').version")"
           tag_version="${RELEASE_TAG#v}"
@@ -70,7 +72,7 @@ jobs:
     # Runs on every push to main and on manual dispatch. Publishes a
     # prerelease versioned as `<package.json version>-next.<UTC timestamp>.<short sha>`
     # to the `next` dist-tag. Never touches `latest`, never commits anything back.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -129,4 +131,3 @@ jobs:
       - name: Publish to npm under `next` dist-tag
         if: steps.check.outputs.already != 'true'
         run: npm publish --tag next --provenance --access public
-
