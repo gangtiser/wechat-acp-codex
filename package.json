@@ -1,0 +1,58 @@
+{
+  "name": "wechat-acp-codex",
+  "version": "0.8.0",
+  "description": "把微信私聊消息桥接到本地 Codex（或任意兼容 ACP 的 agent）",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gangtiser/wechat-acp-codex.git"
+  },
+  "homepage": "https://github.com/gangtiser/wechat-acp-codex#readme",
+  "bugs": {
+    "url": "https://github.com/gangtiser/wechat-acp-codex/issues"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "NOTICE",
+    "package.json"
+  ],
+  "bin": {
+    "wechat-acp-codex": "./dist/bin/wechat-acp-codex.js"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepack": "npm run build",
+    "start": "node dist/bin/wechat-acp-codex.js",
+    "dev": "tsc --watch",
+    "test": "node --import tsx/esm --test tests/**/*.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.16.1",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "wechat",
+    "acp",
+    "agent-client-protocol",
+    "ai-agent",
+    "bridge"
+  ]
+}

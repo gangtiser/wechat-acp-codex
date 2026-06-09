@@ -1,0 +1,5 @@
+wechat-acp-codex is a fork of wechat-acp (https://github.com/formulahendry/wechat-acp),
+Copyright (c) 2026 Jun Han, MIT License. See LICENSE.
+
+Reliability and safety patterns (single-instance lock with takeover, owner
+allowlist, markdown stripping) are adapted from weixin-claude-bridge.

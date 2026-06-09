@@ -1,0 +1,37 @@
+# Node.js
+node_modules/
+dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+
+# Misc
+*.local
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+.claude/
+
+# AI assistant guidance (keep local, not for the public repo)
+CLAUDE.md
+AGENTS.md
+
+# Internal design / planning notes
+docs/superpowers/
