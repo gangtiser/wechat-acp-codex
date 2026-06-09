@@ -420,6 +420,8 @@ node dist/bin/wechat-acp-codex.js --help
 npm run dev
 ```
 
+发布流程见 [docs/release.md](docs/release.md)。稳定版默认通过 `v*` tag 触发 GitHub Actions Trusted Publishing 发布到 npm `latest`，不使用本地 npm token。
+
 ## 遥测
 
 `wechat-acp-codex` 不采集遥测数据。上游项目中的用量采集逻辑已经移除。
