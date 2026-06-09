@@ -47,10 +47,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The npm bundled with Node 24 is < 11.5.1 and silently falls back to
-      # token auth (empty token → misleading 404). Upgrade to a version with
-      # OIDC trusted publishing. No registry-url/token needed. See npm/cli#8730.
-      - run: npm install -g npm@latest
+          registry-url: https://registry.npmjs.org/
+      # Node 24's bundled npm is < 11.5.1 and falls back to (empty) token auth
+      # → misleading 404; upgrade for OIDC trusted publishing (npm/cli#8730).
+      # registry-url sets the registry; OIDC supplies the short-lived token.
+      - run: npm install -g npm@latest && npm -v
       - name: Verify package.json version matches release tag
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -80,7 +81,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm install -g npm@latest
+          registry-url: https://registry.npmjs.org/
+      - run: npm install -g npm@latest && npm -v
       - name: Compute prerelease version
         id: version
         run: |
