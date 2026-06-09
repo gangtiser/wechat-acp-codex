@@ -1,6 +1,6 @@
 {
   "name": "wechat-acp-codex",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "把微信私聊消息桥接到本地 Codex（或任意兼容 ACP 的 agent）",
   "type": "module",
   "repository": {
