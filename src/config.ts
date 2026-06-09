@@ -50,8 +50,8 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   codex: {
     label: "Codex CLI",
     command: "npx",
-    args: ["@gangtiser/codex-acp"],
-    description: "Codex ACP (via @gangtiser/codex-acp pin-wrapper)",
+    args: ["@zed-industries/codex-acp"],
+    description: "Codex ACP (official @zed-industries/codex-acp, tracks latest)",
   },
   opencode: {
     label: "OpenCode",
