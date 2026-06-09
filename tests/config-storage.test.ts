@@ -17,3 +17,8 @@ test("defaultConfig: cwd is process.cwd(), log file is wechat-acp-codex.log", ()
   assert.equal(c.agent.cwd, process.cwd());
   assert.ok(c.daemon.logFile.endsWith("wechat-acp-codex.log"), c.daemon.logFile);
 });
+
+test("defaultConfig: agent thinking is hidden by default", () => {
+  const c = defaultConfig();
+  assert.equal(c.agent.showThoughts, false);
+});

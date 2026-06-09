@@ -84,7 +84,8 @@ Options:
   --idle-timeout <m>  Session idle timeout in minutes (default: 1440)
                       Use 0 to disable idle cleanup
   --max-sessions <n>  Max concurrent user sessions (default: 10)
-  --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
+  --show-thoughts     Forward agent thinking to WeChat (default: hidden)
+  --hide-thoughts     Do not forward agent thinking to WeChat (overrides config)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
   --no-strip-markdown Do not strip markdown from agent replies (default: stripped)
   --text <text>       Message text for "inject"
@@ -144,6 +145,7 @@ function parseArgs(argv: string[]): {
   injectFile?: string;
   injectTo?: string;
   injectContextToken?: string;
+  showThoughts: boolean;
   hideThoughts: boolean;
   showDiffs: boolean;
   stripMarkdown?: boolean;
@@ -158,6 +160,7 @@ function parseArgs(argv: string[]): {
     forceLogin: false,
     daemon: false,
     disableInbox: false,
+    showThoughts: false,
     hideThoughts: false,
     showDiffs: false,
     verbose: false,
@@ -212,6 +215,9 @@ function parseArgs(argv: string[]): {
         break;
       case "--max-sessions":
         result.maxSessions = parseInt(args[++i], 10);
+        break;
+      case "--show-thoughts":
+        result.showThoughts = true;
         break;
       case "--text":
         result.injectText = args[++i];
@@ -527,6 +533,7 @@ async function main(): Promise<void> {
     config.session.idleTimeoutMs = args.idleTimeout * 60_000;
   }
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
+  if (args.showThoughts) config.agent.showThoughts = true;
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;
   if (args.stripMarkdown === false) config.agent.stripMarkdown = false;

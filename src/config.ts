@@ -196,7 +196,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       command: "",
       args: [],
       cwd: process.cwd(),
-      showThoughts: true,
+      showThoughts: false,
       showDiffs: false,
       stripMarkdown: true,
     },

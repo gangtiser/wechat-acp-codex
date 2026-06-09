@@ -32,7 +32,7 @@ bridge 只处理一个 owner 的私聊消息，其他发送者会被静默忽略
 
 ### 微信输出默认做过整理
 
-默认会剥离 agent 回复里的 Markdown，让微信消息更干净；默认转发 agent thinking；默认隐藏 ACP 文件 diff。分别可以用 `--no-strip-markdown`、`--hide-thoughts`、`--show-diffs` 调整。
+默认会剥离 agent 回复里的 Markdown，让微信消息更干净；默认隐藏 agent thinking 和 ACP 文件 diff。分别可以用 `--no-strip-markdown`、`--show-thoughts`、`--show-diffs` 调整。
 
 ### 单实例最新启动者接管
 
@@ -286,7 +286,7 @@ wechat-acp-codex inject --instance projA --text "检查今天的计划"
   "agent": {
     "preset": "codex",
     "cwd": "/Users/me/code/my-project",
-    "showThoughts": true,
+    "showThoughts": false,
     "showDiffs": false,
     "stripMarkdown": true
   },
@@ -332,7 +332,8 @@ wechat-acp-codex status
 | `--max-sessions <n>` | 最大并发用户 session 数；默认 `10` |
 | `--inbox-dir <path>` | 保存微信二进制文件的目录；默认 `<storage.dir>/inbox` |
 | `--no-inbox` | 不保存微信二进制文件，agent 只会看到文件大小提示 |
-| `--hide-thoughts` | 不把 agent thinking 转发到微信；默认转发 |
+| `--show-thoughts` | 把 agent thinking 转发到微信；默认隐藏 |
+| `--hide-thoughts` | 不把 agent thinking 转发到微信；用于覆盖配置文件 |
 | `--show-diffs` | 把 ACP 文件 diff 转发到微信；默认隐藏 |
 | `-v, --verbose` | 输出详细日志 |
 | `-V, --version` | 打印版本号并退出 |

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- Hide agent thinking by default to reduce short-burst WeChat message volume. Use `--show-thoughts` or `agent.showThoughts: true` to forward thinking messages; `--hide-thoughts` remains available to override config files.
+
 ## 0.8.0
 
 - Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat.
