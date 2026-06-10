@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - Fix a WeChat send timeout being silently treated as success: `apiPost` mapped every `AbortError` to `{ret: 0}`, so a timed-out `sendmessage` was counted as delivered and the inbox record was acked without the reply ever reaching WeChat. The timeout→empty-batch mapping now applies only to the `getupdates` long-poll; send/typing/config timeouts throw and go through the existing per-segment retry (same `client_id`, so the gateway de-duplicates). `sendmessage` responses are also checked for an HTTP-200 business error code (`ret`/`errcode` ≠ 0) and treated as failure.
 - Fix the SIGKILL fallback in `killAgent` never firing: `proc.killed` is true right after SIGTERM is *sent*, so the 5s escalation was dead code and agents that ignore SIGTERM lingered as zombies. It now checks actual exit state (`exitCode`/`signalCode`).
