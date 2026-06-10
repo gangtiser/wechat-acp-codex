@@ -110,7 +110,7 @@ async function convertMediaItem(
     return {
       type: "image",
       data: base64,
-      mimeType: "image/jpeg",
+      mimeType: sniffImageMime(buffer),
     } as acp.ContentBlock;
   }
 
@@ -122,9 +122,11 @@ async function convertMediaItem(
     log(`Downloading file "${item.file_item.file_name}" from CDN...`);
     const buffer = await downloadAndDecrypt(media.encrypt_query_param, aesKey, cdnBaseUrl);
 
-    // For text-like files, send as resource; for binary, describe it
+    // For small text-like files, send as resource; for binary or oversized
+    // text (a big CSV/log inlined verbatim would blow up the agent context),
+    // describe it / save it to the inbox dir so the agent reads it by path.
     const fileName = item.file_item.file_name ?? "file";
-    if (isTextFile(fileName)) {
+    if (isTextFile(fileName) && buffer.length <= INLINE_TEXT_MAX_BYTES) {
       const content = buffer.toString("utf-8");
       return {
         type: "resource",
@@ -150,6 +152,21 @@ async function convertMediaItem(
   }
 
   return null;
+}
+
+/** Max bytes of a text file to inline into the prompt as a resource block. */
+const INLINE_TEXT_MAX_BYTES = 256 * 1024;
+
+/** Sniff the actual image format from magic bytes (WeChat doesn't say). */
+function sniffImageMime(buf: Buffer): string {
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return "image/png";
+  }
+  if (buf.length >= 3 && buf.toString("ascii", 0, 3) === "GIF") return "image/gif";
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
+    return "image/webp";
+  }
+  return "image/jpeg";
 }
 
 function isTextFile(name: string): boolean {

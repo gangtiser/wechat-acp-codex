@@ -73,9 +73,6 @@ async function apiPost<T>(
     return JSON.parse(text) as T;
   } catch (err) {
     clearTimeout(timer);
-    if ((err as Error).name === "AbortError") {
-      return { ret: 0, msgs: [] } as T;
-    }
     throw err;
   }
 }
@@ -86,13 +83,23 @@ export async function getUpdates(params: {
   get_updates_buf: string;
   timeoutMs?: number;
 }): Promise<GetUpdatesResp> {
-  return apiPost<GetUpdatesResp>(
-    params.baseUrl,
-    "ilink/bot/getupdates",
-    { get_updates_buf: params.get_updates_buf },
-    params.token,
-    params.timeoutMs ?? 38_000,
-  );
+  try {
+    return await apiPost<GetUpdatesResp>(
+      params.baseUrl,
+      "ilink/bot/getupdates",
+      { get_updates_buf: params.get_updates_buf },
+      params.token,
+      params.timeoutMs ?? 38_000,
+    );
+  } catch (err) {
+    // Long-poll client-side timeout just means "no new messages this cycle".
+    // This mapping is ONLY valid for getupdates — for sendmessage etc. a
+    // timeout must throw so the caller retries (with the same client_id).
+    if ((err as Error).name === "AbortError") {
+      return { ret: 0, msgs: [] };
+    }
+    throw err;
+  }
 }
 
 export async function sendMessage(params: {
@@ -100,7 +107,19 @@ export async function sendMessage(params: {
   token?: string;
   body: SendMessageReq;
 }): Promise<void> {
-  await apiPost(params.baseUrl, "ilink/bot/sendmessage", params.body as unknown as Record<string, unknown>, params.token);
+  const resp = await apiPost<{ ret?: number; errcode?: number; errmsg?: string }>(
+    params.baseUrl,
+    "ilink/bot/sendmessage",
+    params.body as unknown as Record<string, unknown>,
+    params.token,
+  );
+  // The gateway can reject with HTTP 200 + a business error code (getupdates
+  // does this, e.g. errcode -14). Treat an explicit non-zero code as failure
+  // so delivery accounting doesn't ack a message that was never sent.
+  const code = resp.ret ?? resp.errcode;
+  if (code !== undefined && code !== 0) {
+    throw new Error(`sendmessage rejected: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ""}`);
+  }
 }
 
 export async function getUploadUrl(params: {

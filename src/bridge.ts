@@ -76,6 +76,10 @@ export class WeChatAcpBridge {
   // (e.g. a command reply racing an active session flush) cannot interleave
   // their segments and arrive out of order (issue #38).
   private sendChains = new Map<string, Promise<unknown>>();
+  // Per-user promise chain serializing enqueues. Prompt conversion can take
+  // seconds (media downloads), so without the chain a fast-converting text
+  // message could reach the session queue ahead of an earlier image message.
+  private enqueueChains = new Map<string, Promise<unknown>>();
   // Per-user message buffer for /acp-prompt-start.../acp-prompt-done multi-part compose
   private messageBuffers = new Map<string, {
     blocks: acp.ContentBlock[];
@@ -197,7 +201,9 @@ export class WeChatAcpBridge {
         continue;
       }
       this.seenInbox.add(rec.id);
-      this.enqueueMessage(rec.msg, rec.userId, rec.contextToken, rec.id).catch((err) => {
+      this.chainEnqueue(rec.userId, () =>
+        this.enqueueMessage(rec.msg, rec.userId, rec.contextToken, rec.id),
+      ).catch((err) => {
         this.log(`inbox replay failed for ${rec.id}: ${String(err)}`);
         trackException(err, "inbox.replay");
       });
@@ -353,13 +359,36 @@ export class WeChatAcpBridge {
     this.markSeen(inboxId);
 
     const waitForFlush = this.bufferFlushing.get(userId);
-    const enqueue = waitForFlush
-      ? waitForFlush.then(() => this.enqueueMessage(msg, userId, contextToken, inboxId))
-      : this.enqueueMessage(msg, userId, contextToken, inboxId);
-    enqueue.catch((err) => {
+    this.chainEnqueue(userId, async () => {
+      if (waitForFlush) await waitForFlush;
+      await this.enqueueMessage(msg, userId, contextToken, inboxId);
+    }).catch((err) => {
       this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
       trackException(err, "enqueue", hashUserId(userId));
+      // Surface the failure (e.g. agent spawn error) — the record stays
+      // pending and is only retried on the next bridge start, so without a
+      // notice the user would just see silence.
+      this.sendReply(
+        userId, contextToken,
+        `⚠️ 消息处理失败：${String(err)}\n消息已保存，bridge 重启后会自动重试。`,
+      ).catch(() => {});
     });
+  }
+
+  /**
+   * Append a task to the per-user enqueue chain so messages enter the session
+   * queue in arrival order even when an earlier message's prompt conversion
+   * (media download) is still in flight. A failed task does not break the
+   * chain for later messages; its rejection propagates to this call's caller.
+   */
+  private chainEnqueue(userId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.enqueueChains.get(userId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(task);
+    this.enqueueChains.set(
+      userId,
+      current.catch(() => {}),
+    );
+    return current;
   }
 
   private async enqueueMessage(
@@ -580,12 +609,17 @@ export class WeChatAcpBridge {
     // queue behind the buffered prompt, preserving turn order.
     const flushPromise = this.doFlush(userId, contextToken, buffer, pending);
     this.bufferFlushing.set(userId, flushPromise);
-    flushPromise.finally(() => {
-      // Only clear if this is still our flush (not a newer one)
-      if (this.bufferFlushing.get(userId) === flushPromise) {
-        this.bufferFlushing.delete(userId);
-      }
-    });
+    // The .finally() branch re-throws flushPromise rejections into a promise
+    // nobody else holds — swallow them here (the caller of handleBufferDone
+    // still sees the rejection via the returned flushPromise itself).
+    flushPromise
+      .finally(() => {
+        // Only clear if this is still our flush (not a newer one)
+        if (this.bufferFlushing.get(userId) === flushPromise) {
+          this.bufferFlushing.delete(userId);
+        }
+      })
+      .catch(() => {});
     return flushPromise;
   }
 

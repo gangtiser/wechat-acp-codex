@@ -37,7 +37,7 @@ import {
   trackException,
   shutdownTelemetry,
 } from "../src/telemetry/index.js";
-import { acquireLock, releaseLock } from "../src/lock.js";
+import { acquireLock, releaseLock, isAlive, isOurProcess } from "../src/lock.js";
 import packageJson from "../package.json" with { type: "json" };
 
 function usage(): void {
@@ -294,17 +294,26 @@ function handleStop(config: WeChatAcpConfig): void {
   }
 
   const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+  if (!isAlive(pid)) {
+    fs.unlinkSync(pidFile);
+    console.log(`Daemon not running (stale PID ${pid}), cleaned up`);
+    return;
+  }
+  // The pid may have been reused by an unrelated process since the daemon
+  // died — same rule as lock takeover: never kill what we can't verify.
+  if (!isOurProcess(pid)) {
+    console.error(
+      `Refusing to stop: PID ${pid} is not a verifiable wechat-acp-codex process (PID reuse?). ` +
+        `If the daemon is gone, remove ${pidFile} manually.`,
+    );
+    return;
+  }
   try {
     process.kill(pid, "SIGTERM");
     fs.unlinkSync(pidFile);
     console.log(`Stopped daemon (PID ${pid})`);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ESRCH") {
-      fs.unlinkSync(pidFile);
-      console.log(`Daemon not running (stale PID ${pid}), cleaned up`);
-    } else {
-      console.error(`Failed to stop daemon: ${String(err)}`);
-    }
+    console.error(`Failed to stop daemon: ${String(err)}`);
   }
 }
 
@@ -325,12 +334,24 @@ function handleStatus(config: WeChatAcpConfig): void {
   }
 }
 
+const LOG_ROTATE_BYTES = 10 * 1024 * 1024;
+
 function daemonize(config: WeChatAcpConfig): void {
   const logFile = config.daemon.logFile;
   const pidFile = config.daemon.pidFile;
 
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+
+  // Best-effort startup rotation so an append-only daemon log can't grow
+  // without bound across restarts (keeps one .old generation).
+  try {
+    if (fs.statSync(logFile).size > LOG_ROTATE_BYTES) {
+      fs.renameSync(logFile, `${logFile}.old`);
+    }
+  } catch {
+    // no log yet, or rotation blocked (e.g. Windows rename-over-existing)
+  }
 
   const out = fs.openSync(logFile, "a");
   const err = fs.openSync(logFile, "a");

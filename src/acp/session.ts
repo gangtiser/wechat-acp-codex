@@ -5,7 +5,6 @@
  * Messages are queued per-user to ensure serialized processing.
  */
 
-import type { ChildProcess } from "node:child_process";
 import type * as acp from "@agentclientprotocol/sdk";
 import { WeChatAcpClient } from "./client.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";

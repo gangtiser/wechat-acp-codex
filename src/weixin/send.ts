@@ -73,7 +73,13 @@ export function splitText(text: string, maxLen: number): string[] {
 
     // Try to break at a newline
     let breakAt = remaining.lastIndexOf("\n", maxLen);
-    if (breakAt <= 0) breakAt = maxLen;
+    if (breakAt <= 0) {
+      breakAt = maxLen;
+      // Hard cut: don't split a surrogate pair (e.g. emoji) — step back one
+      // code unit so the pair stays intact in the next segment.
+      const last = remaining.charCodeAt(breakAt - 1);
+      if (last >= 0xd800 && last <= 0xdbff && breakAt > 1) breakAt--;
+    }
 
     segments.push(remaining.substring(0, breakAt));
     remaining = remaining.substring(breakAt).replace(/^\n/, "");

@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sendTextMessage } from "../src/weixin/send.js";
+import { sendTextMessage, splitText } from "../src/weixin/send.js";
 import type { sendMessage as SendMessageFn } from "../src/weixin/api.js";
 
 type SendMessageArgs = Parameters<typeof SendMessageFn>[0];
@@ -17,7 +17,7 @@ type SendMessageArgs = Parameters<typeof SendMessageFn>[0];
 function makeFakeSendFn(capturedIds: string[], throws?: () => Error): typeof SendMessageFn {
   let callCount = 0;
   return async (args: SendMessageArgs) => {
-    capturedIds.push(args.body.msg.client_id);
+    capturedIds.push(args.body.msg!.client_id!);
     callCount++;
     if (throws && callCount === 1) throw throws();
   };
@@ -57,7 +57,7 @@ test("same clientId on retry means gateway receives identical client_id both tim
   const capturedIds: string[] = [];
   let callCount = 0;
   const fakeSend: typeof SendMessageFn = async (args: SendMessageArgs) => {
-    capturedIds.push(args.body.msg.client_id);
+    capturedIds.push(args.body.msg!.client_id!);
     callCount++;
     if (callCount === 1) {
       throw new Error("connection reset");
@@ -80,4 +80,12 @@ test("same clientId on retry means gateway receives identical client_id both tim
     [stableId, stableId],
     "both calls must carry the same client_id so the gateway can de-duplicate",
   );
+});
+
+test("splitText does not split a surrogate pair at the hard-cut boundary", () => {
+  // "aaa😀" with maxLen 4: a naive cut at index 4 would land between the
+  // emoji's two UTF-16 code units and produce mojibake in both segments.
+  const segments = splitText("aaa😀", 4);
+  assert.deepEqual(segments, ["aaa", "😀"]);
+  assert.equal(segments.join(""), "aaa😀", "no characters lost or corrupted");
 });

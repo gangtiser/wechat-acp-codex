@@ -29,9 +29,15 @@ export function loadToken(storageDir: string): TokenData | null {
 }
 
 export function saveToken(storageDir: string, data: TokenData): void {
-  fs.mkdirSync(storageDir, { recursive: true });
+  fs.mkdirSync(storageDir, { recursive: true, mode: 0o700 });
   const tokenPath = getTokenPath(storageDir);
-  fs.writeFileSync(tokenPath, JSON.stringify(data, null, 2), "utf-8");
+  fs.writeFileSync(tokenPath, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+  // {mode} only applies on create — tighten a pre-existing token file too.
+  try {
+    fs.chmodSync(tokenPath, 0o600);
+  } catch {
+    // best-effort (e.g. Windows)
+  }
 }
 
 export async function login(params: {

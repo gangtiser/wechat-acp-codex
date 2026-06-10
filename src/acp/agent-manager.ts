@@ -96,11 +96,14 @@ export async function spawnAgent(params: {
 }
 
 export function killAgent(proc: ChildProcess): void {
-  if (!proc.killed) {
-    proc.kill("SIGTERM");
-    // Force kill after 5s if still alive
-    setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, 5_000).unref();
-  }
+  // proc.killed only means "a signal was sent", so it can't gate the SIGKILL
+  // fallback (it is already true right after the SIGTERM). Check actual exit
+  // state instead, or agents that ignore SIGTERM linger as zombies.
+  const exited = () => proc.exitCode !== null || proc.signalCode !== null;
+  if (exited()) return;
+  proc.kill("SIGTERM");
+  // Force kill after 5s if still alive
+  setTimeout(() => {
+    if (!exited()) proc.kill("SIGKILL");
+  }, 5_000).unref();
 }

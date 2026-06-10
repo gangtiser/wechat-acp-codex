@@ -30,8 +30,6 @@ export class WeChatAcpClient implements acp.Client {
   // cannot interleave sends (e.g. chunk B reaching WeChat before chunk A).
   private messageFlushChain: Promise<void> = Promise.resolve();
   private static readonly TYPING_INTERVAL_MS = 5_000;
-  private static readonly SEND_MAX_ATTEMPTS = 3;
-  private static readonly SEND_RETRY_BASE_MS = 300;
 
   /** Whether the agent emitted any non-empty message content during the current turn. */
   get hasProducedMessage(): boolean {
@@ -194,12 +192,14 @@ export class WeChatAcpClient implements acp.Client {
     const thoughtText = this.thoughtChunks.join("");
     this.thoughtChunks = [];
     if (!thoughtText.trim()) return;
-    const ok = await this.sendWithRetry(
-      () => this.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`),
-      "thought",
-    );
-    if (!ok) {
-      this.opts.log(`[flush] dropping ${thoughtText.length} chars of thought after retries`);
+    try {
+      const r = await this.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`);
+      if (!r.allSent) {
+        this.opts.log(`[flush] thought delivered ${r.sent}/${r.total} segment(s)`);
+      }
+    } catch (err) {
+      // Thoughts are decoration — drop on failure, never break the turn.
+      this.opts.log(`[flush] dropping ${thoughtText.length} chars of thought: ${String(err)}`);
     }
   }
 
@@ -236,43 +236,28 @@ export class WeChatAcpClient implements acp.Client {
     await prev.catch(() => {});
 
     try {
-      const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
-      if (!ok) {
-        // Send failed after all retries. Prepend the unsent text back so the
-        // final flush() returns it and session.ts re-attempts via onReply (which
-        // surfaces failure to the user). Any new chunks appended during the
-        // failed send attempts are preserved after the restored text.
-        this.chunks = [text, ...this.chunks];
+      // No retry layer here: per-segment retries (with a stable client_id)
+      // already live inside deliverReply, and its failures are reported via
+      // DeliveryResult instead of a throw.
+      const r = await this.opts.onMessageFlush(text);
+      if (!r.allSent) {
+        // Partial delivery: the segments that DID send must not be re-sent
+        // (re-sending the whole text would duplicate them), so don't restore
+        // the buffer — the unacked turn is replayed from the inbox instead.
         this.opts.log(
-          `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
+          `[flush] message delivered ${r.sent}/${r.total} segment(s); relying on inbox replay`,
         );
       }
+    } catch (err) {
+      // The send callback threw (nothing delivered). Prepend the text back so
+      // the final flush() returns it and session.ts re-attempts via onReply.
+      // New chunks appended during the failed send are preserved after the
+      // restored text.
+      this.chunks = [text, ...this.chunks];
+      this.opts.log(`[flush] message send threw; retaining ${text.length} chars for final flush: ${String(err)}`);
     } finally {
       resolve();
     }
-  }
-
-  /**
-   * Send with bounded retries and linear backoff (`SEND_RETRY_BASE_MS *
-   * attempt`). Returns true on success, false if all attempts failed
-   * (logging each failure so transient WeChat send errors are surfaced
-   * instead of silently swallowed).
-   */
-  private async sendWithRetry(send: () => Promise<unknown>, label: string): Promise<boolean> {
-    for (let attempt = 1; attempt <= WeChatAcpClient.SEND_MAX_ATTEMPTS; attempt++) {
-      try {
-        await send();
-        return true;
-      } catch (err) {
-        this.opts.log(
-          `[flush] ${label} send failed (attempt ${attempt}/${WeChatAcpClient.SEND_MAX_ATTEMPTS}): ${String(err)}`,
-        );
-        if (attempt < WeChatAcpClient.SEND_MAX_ATTEMPTS) {
-          await new Promise((r) => setTimeout(r, WeChatAcpClient.SEND_RETRY_BASE_MS * attempt));
-        }
-      }
-    }
-    return false;
   }
 
   private async maybeSendTyping(): Promise<void> {

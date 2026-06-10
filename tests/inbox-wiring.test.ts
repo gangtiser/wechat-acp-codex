@@ -51,6 +51,36 @@ test("non-owner message: not persisted, not enqueued", async () => {
   assert.equal(enqueued.length, 0);
 });
 
+test("per-user enqueue is serialized: slow prompt conversion cannot reorder messages", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wc-wiring4-"));
+  const { bridge, enqueued } = makeBridge(dir);
+
+  // Stall the first message inside enqueueMessage (stands in for a slow
+  // media download during prompt conversion); the second converts instantly.
+  const realEnqueueMessage = bridge.enqueueMessage.bind(bridge);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let calls = 0;
+  bridge.enqueueMessage = async (...args: unknown[]) => {
+    calls++;
+    if (calls === 1) await gate;
+    return realEnqueueMessage(...args);
+  };
+
+  await bridge.handleMessage(textMsg(10));
+  await bridge.handleMessage(textMsg(11));
+  await tick();
+  assert.equal(enqueued.length, 0, "second message must queue behind the stalled first");
+
+  release();
+  await tick();
+  assert.deepEqual(
+    enqueued.map((e: any) => e.m.inboxId),
+    ["m10", "m11"],
+    "messages must reach the session queue in arrival order",
+  );
+});
+
 test("seeded failed/ id is a tombstone: handleMessage skips it (no re-persist, no enqueue) (H#7/#13)", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wc-wiring3-"));
   fs.mkdirSync(path.join(dir, "queue", "failed"), { recursive: true });

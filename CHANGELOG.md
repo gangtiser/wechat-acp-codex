@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Fix a WeChat send timeout being silently treated as success: `apiPost` mapped every `AbortError` to `{ret: 0}`, so a timed-out `sendmessage` was counted as delivered and the inbox record was acked without the reply ever reaching WeChat. The timeout→empty-batch mapping now applies only to the `getupdates` long-poll; send/typing/config timeouts throw and go through the existing per-segment retry (same `client_id`, so the gateway de-duplicates). `sendmessage` responses are also checked for an HTTP-200 business error code (`ret`/`errcode` ≠ 0) and treated as failure.
+- Fix the SIGKILL fallback in `killAgent` never firing: `proc.killed` is true right after SIGTERM is *sent*, so the 5s escalation was dead code and agents that ignore SIGTERM lingered as zombies. It now checks actual exit state (`exitCode`/`signalCode`).
+- Fix per-user message ordering: enqueues are now serialized per user, so a fast-converting text message can no longer overtake an earlier image/file message whose CDN download is still in flight (applies to live messages and startup replay).
+- Surface enqueue failures (e.g. agent spawn error) to the user in WeChat instead of only logging — the message stays persisted and is retried on the next bridge start.
+- Exit with a clear fatal error after 3 consecutive session-expired poll cycles (errcode -14, 1 hour apart) instead of retrying a dead token forever while `status` reports the daemon as running. Re-login requires `--login` + QR scan.
+- `stop` now refuses to kill a PID that is not a verifiable wechat-acp-codex process (PID reuse), matching the lock takeover's safety rule.
+- Save `token.json` with mode 0o600 (it was the only sensitive file without tightened permissions) and write `sync-buf.json` atomically (tmp+rename) so a crash mid-write can't reset the poll cursor.
+- Cap inline text-file content at 256 KB — larger text files are saved to the inbox dir and referenced by path instead of being inlined into the prompt. Sniff the real image MIME type (png/gif/webp/jpeg) from magic bytes instead of always claiming `image/jpeg`. Don't split a surrogate pair (emoji) at the hard 4000-char segment boundary.
+- Rotate the daemon log at startup when it exceeds 10 MB (keeps one `.old` generation).
+- Remove the dead retry layer in `client.ts` (`sendWithRetry` retried only on throw, but delivery failures are reported via `DeliveryResult`, never thrown): partial deliveries now explicitly rely on inbox replay, a thrown send still retains the buffer for the final flush.
+- Tooling: `npm test` now type-checks `tests/` first (`tsconfig.tests.json`, noEmit); add ESLint with only `no-floating-promises` + `no-misused-promises` (`npm run lint`, also in CI); enable `noUnusedLocals`.
+
 ## 0.8.3
 
 - Hide agent thinking by default to reduce short-burst WeChat message volume. Use `--show-thoughts` or `agent.showThoughts: true` to forward thinking messages; `--hide-thoughts` remains available to override config files.

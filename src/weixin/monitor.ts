@@ -14,6 +14,13 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_DELAY_MS = 30_000;
 const RETRY_DELAY_MS = 2_000;
 const SESSION_EXPIRED_ERRCODE = -14;
+// Re-login needs a human QR scan, so after this many consecutive expired
+// cycles (1 hour apart) keeping the process alive only fakes liveness —
+// exit instead so daemon status / supervisors surface the problem.
+const SESSION_EXPIRED_MAX_CYCLES = 3;
+
+/** Thrown to escape the poll loop when the bot session is expired for good. */
+export class SessionExpiredError extends Error {}
 
 export interface MonitorOpts {
   baseUrl: string;
@@ -42,7 +49,12 @@ function loadSyncBuf(storageDir: string): string {
 
 function saveSyncBuf(storageDir: string, buf: string): void {
   fs.mkdirSync(storageDir, { recursive: true });
-  fs.writeFileSync(getSyncBufPath(storageDir), JSON.stringify({ get_updates_buf: buf }), "utf-8");
+  // tmp+rename: a crash mid-write must not corrupt the cursor file — a corrupt
+  // file parses as "no cursor" and would re-deliver a large message backlog.
+  const dst = getSyncBufPath(storageDir);
+  const tmp = `${dst}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ get_updates_buf: buf }), "utf-8");
+  fs.renameSync(tmp, dst);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -78,6 +90,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
 
   let nextTimeoutMs = opts.longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   let consecutiveFailures = 0;
+  let sessionExpiredCycles = 0;
 
   while (!abortSignal?.aborted) {
     try {
@@ -101,7 +114,17 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
           resp.errcode === SESSION_EXPIRED_ERRCODE || resp.ret === SESSION_EXPIRED_ERRCODE;
 
         if (isSessionExpired) {
-          log(`Session expired (errcode ${SESSION_EXPIRED_ERRCODE}), pausing 1 hour...`);
+          sessionExpiredCycles++;
+          if (sessionExpiredCycles >= SESSION_EXPIRED_MAX_CYCLES) {
+            throw new SessionExpiredError(
+              `WeChat session expired (errcode ${SESSION_EXPIRED_ERRCODE}) for ${SESSION_EXPIRED_MAX_CYCLES} consecutive checks. ` +
+                `Re-login required: re-run with --login and scan the QR code.`,
+            );
+          }
+          log(
+            `Session expired (errcode ${SESSION_EXPIRED_ERRCODE}); re-login required (re-run with --login). ` +
+              `Re-checking in 1 hour (${sessionExpiredCycles}/${SESSION_EXPIRED_MAX_CYCLES})...`,
+          );
           consecutiveFailures = 0;
           await sleep(60 * 60_000, abortSignal);
           continue;
@@ -121,6 +144,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
       }
 
       consecutiveFailures = 0;
+      sessionExpiredCycles = 0;
 
       const cursor = resp.get_updates_buf;
       await applyBatch(resp.msgs ?? [], onMessage, () => {
@@ -131,6 +155,7 @@ export async function startMonitor(opts: MonitorOpts): Promise<void> {
       });
     } catch (err) {
       if (abortSignal?.aborted) return;
+      if (err instanceof SessionExpiredError) throw err; // fatal: exit instead of fake liveness
 
       consecutiveFailures++;
       log(`getUpdates error (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${String(err)}`);

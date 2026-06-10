@@ -10,15 +10,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WeChatAcpClient } from "../src/acp/client.js";
+import type { DeliveryResult } from "../src/weixin/send.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+const delivered = (): DeliveryResult => ({ total: 1, sent: 1, allSent: true });
+
 /** Build a minimal WeChatAcpClient with controllable callbacks. */
 function makeClient(opts: {
-  onMessageFlush?: (text: string) => Promise<void>;
-  onThoughtFlush?: (text: string) => Promise<void>;
+  onMessageFlush?: (text: string) => Promise<DeliveryResult>;
+  onThoughtFlush?: (text: string) => Promise<DeliveryResult>;
   sendDelay?: number;
 }): WeChatAcpClient {
   const { sendDelay = 0 } = opts;
@@ -30,11 +33,13 @@ function makeClient(opts: {
       opts.onThoughtFlush ??
       (async () => {
         if (sendDelay) await delay(sendDelay);
+        return delivered();
       }),
     onMessageFlush:
       opts.onMessageFlush ??
       (async () => {
         if (sendDelay) await delay(sendDelay);
+        return delivered();
       }),
     log: () => {},
     showThoughts: false,
@@ -65,7 +70,7 @@ async function emitThoughtChunk(client: WeChatAcpClient, text = "thinking…"): 
 
 test("single intermediate message is flushed exactly once (sequential)", async () => {
   const calls: string[] = [];
-  const client = makeClient({ onMessageFlush: async (t) => { calls.push(t); } });
+  const client = makeClient({ onMessageFlush: async (t) => { calls.push(t); return delivered(); } });
 
   await emitMessageChunk(client, "status update");
   await emitToolCall(client);
@@ -86,6 +91,7 @@ test("concurrent tool_call events send the buffered message exactly once", async
     onMessageFlush: async (text) => {
       calls.push(text);
       await new Promise<void>((r) => setTimeout(r, 20));
+      return delivered();
     },
   });
 
@@ -106,6 +112,7 @@ test("three concurrent boundary events send the message exactly once", async () 
     onMessageFlush: async (text) => {
       calls.push(text);
       await new Promise<void>((r) => setTimeout(r, 30));
+      return delivered();
     },
   });
 
@@ -126,7 +133,7 @@ test("three concurrent boundary events send the message exactly once", async () 
 test("final answer is delivered after intermediate flush clears the buffer", async () => {
   const messageCalls: string[] = [];
   const client = makeClient({
-    onMessageFlush: async (t) => { messageCalls.push(t); },
+    onMessageFlush: async (t) => { messageCalls.push(t); return delivered(); },
   });
   client.newTurn();
 
@@ -153,6 +160,23 @@ test("failed send retains buffer so final flush delivers the message", async () 
   assert.equal(replyText, "status");
 });
 
+test("partial delivery (allSent=false) does NOT restore the buffer", async () => {
+  /**
+   * Some segments reached WeChat, some didn't. Restoring the whole text would
+   * re-send the delivered segments (duplicates); recovery is owned by the
+   * inbox replay path (deliveryFailed → turn not acked).
+   */
+  const client = makeClient({
+    onMessageFlush: async () => ({ total: 2, sent: 1, allSent: false }),
+  });
+
+  await emitMessageChunk(client, "status");
+  await emitToolCall(client);
+
+  const replyText = await client.flush();
+  assert.equal(replyText, "", "buffer must stay empty after a partial delivery");
+});
+
 test("two sequential flushes are delivered in order (second waits for first)", async () => {
   /**
    * Scenario: chunk A is flushed at boundary-1, then chunk B is flushed at
@@ -170,6 +194,7 @@ test("two sequential flushes are delivered in order (second waits for first)", a
         });
       }
       order.push(text);
+      return delivered();
     },
   });
 

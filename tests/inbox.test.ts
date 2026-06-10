@@ -8,7 +8,7 @@ import {
 } from "../src/inbox/store.js";
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), "wc-inbox-")); }
-function rec(id, ts, attempts = 0) {
+function rec(id: string, ts: string, attempts = 0) {
   return { id, userId: "u", contextToken: "ct", msg: { message_id: 1 }, ts, attempts };
 }
 
