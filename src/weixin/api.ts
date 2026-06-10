@@ -9,8 +9,6 @@ import type {
   BaseInfo,
   GetUpdatesResp,
   SendMessageReq,
-  GetUploadUrlReq,
-  GetUploadUrlResp,
   SendTypingReq,
   GetConfigResp,
 } from "./types.js";
@@ -120,19 +118,6 @@ export async function sendMessage(params: {
   if (code !== undefined && code !== 0) {
     throw new Error(`sendmessage rejected: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ""}`);
   }
-}
-
-export async function getUploadUrl(params: {
-  baseUrl: string;
-  token?: string;
-  body: GetUploadUrlReq;
-}): Promise<GetUploadUrlResp> {
-  return apiPost<GetUploadUrlResp>(
-    params.baseUrl,
-    "ilink/bot/getuploadurl",
-    params.body as unknown as Record<string, unknown>,
-    params.token,
-  );
 }
 
 export async function getConfig(params: {

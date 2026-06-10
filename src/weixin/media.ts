@@ -1,15 +1,10 @@
 /**
- * AES-128-ECB encrypt/decrypt for WeChat CDN media.
+ * AES-128-ECB decrypt for WeChat CDN media downloads.
  * Adapted from @tencent-weixin/openclaw-weixin cdn/aes-ecb.ts
  */
 
 import crypto from "node:crypto";
 import type { CDNMedia } from "./types.js";
-
-export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
-  const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
-  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
-}
 
 export function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   const decipher = crypto.createDecipheriv("aes-128-ecb", key, null);
@@ -47,26 +42,4 @@ export async function downloadAndDecrypt(
   if (!res.ok) throw new Error(`CDN download failed: HTTP ${res.status}`);
   const ciphertext = Buffer.from(await res.arrayBuffer());
   return decryptAesEcb(ciphertext, aesKey);
-}
-
-export async function uploadToCdn(params: {
-  buffer: Buffer;
-  uploadParam: string;
-  aesKey: Buffer;
-  filekey: string;
-  cdnBaseUrl: string;
-}): Promise<string> {
-  const encrypted = encryptAesEcb(params.buffer, params.aesKey);
-  const url = `${params.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(params.uploadParam)}&filekey=${encodeURIComponent(params.filekey)}`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: encrypted,
-  });
-
-  if (!res.ok) throw new Error(`CDN upload failed: HTTP ${res.status}`);
-  const downloadParam = res.headers.get("x-encrypted-param");
-  if (!downloadParam) throw new Error("CDN upload: missing x-encrypted-param header");
-  return downloadParam;
 }

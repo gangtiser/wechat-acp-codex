@@ -6,15 +6,16 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, splitText, deliveryResult, type DeliveryResult } from "./weixin/send.js";
-import { sendTyping, getConfig } from "./weixin/api.js";
-import { TypingStatus, MessageType } from "./weixin/types.js";
+import type { DeliveryResult } from "./weixin/send.js";
+import { ReplyPipeline } from "./weixin/reply.js";
+import { MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
+import { formatConfigList, formatConfigUsage, resolveConfigValue, type ConfigCommandUsage } from "./acp/config-options.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
+import { MessageBufferManager } from "./message-buffer.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
 import { InjectionMonitor } from "./inject/monitor.js";
@@ -30,21 +31,6 @@ const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
 const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
 const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
-const TEXT_CHUNK_LIMIT = 4000;
-const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const BUFFER_MAX_BLOCKS = 50;
-const SEGMENT_SEND_MAX_ATTEMPTS = 3;
-const SEGMENT_SEND_RETRY_BASE_MS = 300;
-
-/**
- * Minimum spacing between two consecutive outbound text messages to the
- * same user. Each reply segment is an independent iLink API call with no
- * ordering hint, and WeChat appears to order back-to-back bot messages by
- * server-receive time. Without spacing, near-simultaneous sends can race
- * and be delivered to the user out of order (see issue #38). A short delay
- * separates their server-side timestamps and preserves order.
- */
-const REPLY_SEND_SPACING_MS = 150;
 
 /**
  * Owner-gate a sender: returns true if allowed. When allowFirst binds a new
@@ -67,33 +53,14 @@ export class WeChatAcpBridge {
   private injectionMonitor: InjectionMonitor | null = null;
   private tokenData: TokenData | null = null;
   private stateUpdate = Promise.resolve();
-  // Per-user typing ticket cache
-  private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
-  // Timestamp (ms) at which the last text message was issued to each user,
-  // used to pace consecutive sends so they don't race and arrive reordered.
-  private lastSendAt = new Map<string, number>();
-  // Per-user promise chain serializing replies so concurrent sendReply calls
-  // (e.g. a command reply racing an active session flush) cannot interleave
-  // their segments and arrive out of order (issue #38).
-  private sendChains = new Map<string, Promise<unknown>>();
+  // Outbound delivery: per-user ordering, segment retries, pacing, typing
+  private reply: ReplyPipeline;
+  // /acp-prompt-start … /acp-prompt-done multi-part compose
+  private composeBuffer: MessageBufferManager;
   // Per-user promise chain serializing enqueues. Prompt conversion can take
   // seconds (media downloads), so without the chain a fast-converting text
   // message could reach the session queue ahead of an earlier image message.
   private enqueueChains = new Map<string, Promise<unknown>>();
-  // Per-user message buffer for /acp-prompt-start.../acp-prompt-done multi-part compose
-  private messageBuffers = new Map<string, {
-    blocks: acp.ContentBlock[];
-    contextToken: string;
-    pending: Promise<void>;
-    lastUpdatedAt: number;
-  }>();
-  // Per-user expiry timers for buffer cleanup
-  private bufferTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Users currently flushing their buffer (between /done and enqueue).
-  // Maps userId to a promise that resolves when the flush completes, so
-  // messages arriving during the flush wait for the buffered prompt to
-  // enqueue first, preserving turn order.
-  private bufferFlushing = new Map<string, Promise<void>>();
   private seenInbox = new Set<string>();
   // Poison tombstones (ids moved to failed/). SEPARATE, UNCAPPED set so they are
   // never FIFO-evicted from seenInbox (#12) — an evicted tombstone would let a
@@ -105,6 +72,22 @@ export class WeChatAcpBridge {
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
     this.config = config;
     this.log = log ?? ((msg: string) => console.log(`[wechat-acp-codex] ${msg}`));
+    this.reply = new ReplyPipeline({
+      // tokenData is set by start() before anything can send
+      auth: () => ({ baseUrl: this.tokenData!.baseUrl, token: this.tokenData!.token }),
+      log: (msg) => this.log(msg),
+    });
+    this.composeBuffer = new MessageBufferManager({
+      convert: (msg) =>
+        weixinMessageToPrompt(msg, this.config.wechat.cdnBaseUrl, this.log, this.config.storage.inboxDir),
+      enqueue: (userId, prompt, contextToken) => this.sessionManager!.enqueue(userId, { prompt, contextToken }),
+      notify: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
+      labels: {
+        start: `${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)}`,
+        done: `${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}`,
+      },
+      log: (msg) => this.log(msg),
+    });
   }
 
   async start(opts?: {
@@ -167,7 +150,7 @@ export class WeChatAcpBridge {
       log: this.log,
       onReply: (userId, contextToken, text) =>
         this.sendReply(userId, contextToken, maybeStrip(text, this.config.agent.stripMarkdown ?? true)),
-      sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
+      sendTyping: (userId, contextToken) => this.reply.sendTypingIndicator(userId, contextToken),
       onTurnSettled: (inboxId, ok) => settleInbox(this.config.storage.dir, inboxId, ok),
     });
     this.sessionManager.start();
@@ -329,14 +312,14 @@ export class WeChatAcpBridge {
 
     // /acp-prompt-start — enter buffering mode
     if (this.isBufferStartCommand(msg)) {
-      this.handleBufferStart(userId, contextToken);
+      this.composeBuffer.start(userId, contextToken);
       this.markSeen(inboxId);
       return;
     }
 
     // /acp-prompt-done — flush buffer and send to agent (best-effort per spec)
     if (this.isBufferDoneCommand(msg)) {
-      this.handleBufferDone(userId, contextToken).catch((err) => {
+      this.composeBuffer.done(userId, contextToken).catch((err) => {
         this.log(`Failed to flush message buffer for ${userId}: ${String(err)}`);
         trackException(err, "buffer", hashUserId(userId));
       });
@@ -345,8 +328,8 @@ export class WeChatAcpBridge {
     }
 
     // If user is in buffering mode, append to buffer instead of enqueuing
-    if (this.messageBuffers.has(userId)) {
-      this.appendToBuffer(msg, userId, contextToken);
+    if (this.composeBuffer.isBuffering(userId)) {
+      this.composeBuffer.append(msg, userId, contextToken);
       this.markSeen(inboxId);
       return;
     }
@@ -358,7 +341,7 @@ export class WeChatAcpBridge {
     await writePending(this.config.storage.dir, record); // throws -> not seen, cursor not advanced, retried
     this.markSeen(inboxId);
 
-    const waitForFlush = this.bufferFlushing.get(userId);
+    const waitForFlush = this.composeBuffer.flushing(userId);
     this.chainEnqueue(userId, async () => {
       if (waitForFlush) await waitForFlush;
       await this.enqueueMessage(msg, userId, contextToken, inboxId);
@@ -446,20 +429,24 @@ export class WeChatAcpBridge {
         },
         hashUserId(userId),
       );
-      await this.sendReply(userId, contextToken, this.formatAcpConfigList(userId));
+      await this.sendReply(userId, contextToken, this.acpConfigList(userId));
       return;
     }
 
     if (args[1] === "set") {
       if (args.length < 4) {
-        await this.sendReply(userId, contextToken, this.formatAcpConfigUsage("Missing configId or value."));
+        await this.sendReply(userId, contextToken, formatConfigUsage(this.configUsage(), "Missing configId or value."));
         return;
       }
 
       const configId = args[2]!;
       const rawValue = args.slice(3).join(" ");
       try {
-        const resolved = this.resolveAcpConfigValue(userId, configId, rawValue);
+        const resolved = resolveConfigValue(
+          this.sessionManager?.getSessionConfigOptions(userId),
+          configId,
+          rawValue,
+        );
         await this.sessionManager!.setSessionConfigOption(userId, configId, resolved.rawValue);
         const optionType = this.sessionManager!
           .getSessionConfigOptions(userId)
@@ -477,13 +464,13 @@ export class WeChatAcpBridge {
         await this.sendReply(
           userId,
           contextToken,
-          `✅ Updated ACP config: ${configId} = ${resolved.displayValue}\n\n${this.formatAcpConfigList(userId)}`,
+          `✅ Updated ACP config: ${configId} = ${resolved.displayValue}\n\n${this.acpConfigList(userId)}`,
         );
       } catch (err) {
         await this.sendReply(
           userId,
           contextToken,
-          this.formatAcpConfigUsage(err instanceof Error ? err.message : String(err)),
+          formatConfigUsage(this.configUsage(), err instanceof Error ? err.message : String(err)),
         );
       }
       return;
@@ -492,8 +479,16 @@ export class WeChatAcpBridge {
     await this.sendReply(
       userId,
       contextToken,
-      this.formatAcpConfigUsage(`Unknown subcommand: ${args[1]}`),
+      formatConfigUsage(this.configUsage(), `Unknown subcommand: ${args[1]}`),
     );
+  }
+
+  private acpConfigList(userId: string): string {
+    return formatConfigList(this.sessionManager?.getSessionConfigOptions(userId), this.configUsage());
+  }
+
+  private configUsage(): ConfigCommandUsage {
+    return { command: ACP_CONFIG_COMMAND, aliasHint: this.aliasHint(ACP_CONFIG_COMMAND) };
   }
 
   private async handleAcpCancelCommand(
@@ -571,169 +566,6 @@ export class WeChatAcpBridge {
     return this.extractBridgeCommand(msg, BUFFER_DONE_COMMAND) !== null;
   }
 
-  private handleBufferStart(userId: string, contextToken: string): void {
-    if (this.messageBuffers.has(userId)) {
-      const buffer = this.messageBuffers.get(userId)!;
-      this.sendReply(userId, contextToken, `📝 Already in buffering mode (${buffer.blocks.length} block(s) collected). Keep sending, then ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit.`).catch((err) => {
-        this.log(`Failed to send buffer active notice to ${userId}: ${String(err)}`);
-      });
-      return;
-    }
-
-    this.messageBuffers.set(userId, { blocks: [], contextToken, pending: Promise.resolve(), lastUpdatedAt: Date.now() });
-    this.resetBufferTimer(userId);
-    this.log(`Buffer started for ${userId}`);
-    trackEvent(
-      "command.buffer_start",
-      { userIdHash: hashUserId(userId) },
-      hashUserId(userId),
-    );
-    this.sendReply(userId, contextToken, `📝 Buffering mode started. Send your messages (text, images, files), then send ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit them all at once.\n⚠️ 缓冲期间的消息不享有断点重发保护，进程中断会丢失。`).catch((err) => {
-      this.log(`Failed to send buffer start confirmation to ${userId}: ${String(err)}`);
-    });
-  }
-
-  private handleBufferDone(userId: string, contextToken: string): Promise<unknown> {
-    const buffer = this.messageBuffers.get(userId);
-    if (!buffer) {
-      return this.sendReply(userId, contextToken, `⚠️ Nothing buffered. Send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} first, then send messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
-    }
-
-    // Remove from map immediately so new messages during the await
-    // are not appended to a stale buffer.
-    const pending = buffer.pending;
-    this.messageBuffers.delete(userId);
-    this.clearBufferTimer(userId);
-
-    // Register a flushing promise so messages arriving during the await
-    // queue behind the buffered prompt, preserving turn order.
-    const flushPromise = this.doFlush(userId, contextToken, buffer, pending);
-    this.bufferFlushing.set(userId, flushPromise);
-    // The .finally() branch re-throws flushPromise rejections into a promise
-    // nobody else holds — swallow them here (the caller of handleBufferDone
-    // still sees the rejection via the returned flushPromise itself).
-    flushPromise
-      .finally(() => {
-        // Only clear if this is still our flush (not a newer one)
-        if (this.bufferFlushing.get(userId) === flushPromise) {
-          this.bufferFlushing.delete(userId);
-        }
-      })
-      .catch(() => {});
-    return flushPromise;
-  }
-
-  private async doFlush(
-    userId: string,
-    contextToken: string,
-    buffer: { blocks: acp.ContentBlock[]; contextToken: string; pending: Promise<void>; lastUpdatedAt: number },
-    pending: Promise<void>,
-  ): Promise<void> {
-    // Wait for any in-flight appends to finish before reading
-    try {
-      await pending;
-    } catch {
-      // A prior append failed (e.g. image download error). The chain
-      // already logged/tracked the error. Clear the buffer so the user
-      // can start fresh.
-      await this.sendReply(userId, contextToken, `⚠️ A buffered message failed to process. Buffer cleared. Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} to try again.`);
-      return;
-    }
-
-    // Check expiry
-    if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
-      await this.sendReply(userId, contextToken, `⚠️ Buffer expired (10 min without activity). Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} to start over.`);
-      return;
-    }
-
-    if (buffer.blocks.length === 0) {
-      await this.sendReply(userId, contextToken, `⚠️ Buffer is empty. Send some messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
-      return;
-    }
-
-    this.log(`Buffer flushed for ${userId}: ${buffer.blocks.length} block(s)`);
-    trackEvent(
-      "command.buffer_done",
-      {
-        userIdHash: hashUserId(userId),
-        blockCount: buffer.blocks.length,
-      },
-      hashUserId(userId),
-    );
-
-    await this.sessionManager!.enqueue(userId, {
-      prompt: buffer.blocks,
-      contextToken: buffer.contextToken,
-    });
-  }
-
-  private appendToBuffer(
-    msg: WeixinMessage,
-    userId: string,
-    contextToken: string,
-  ): void {
-    const buffer = this.messageBuffers.get(userId);
-    if (!buffer) return;
-
-    // Chain the async conversion so /acp-prompt-done waits for all in-flight appends
-    buffer.pending = buffer.pending
-      .then(async () => {
-        // Re-check buffer still exists (could have been flushed or expired)
-        if (!this.messageBuffers.has(userId)) return;
-
-        // Check TTL
-        if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
-          this.messageBuffers.delete(userId);
-          this.log(`Buffer expired for ${userId}`);
-          await this.sendReply(userId, contextToken, `⚠️ Buffering timed out (10 min without activity). Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} again.`);
-          return;
-        }
-
-        // Check block limit
-        if (buffer.blocks.length >= BUFFER_MAX_BLOCKS) {
-          await this.sendReply(userId, contextToken, `⚠️ Buffer is full (${BUFFER_MAX_BLOCKS} blocks max). Send ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit what you have.`);
-          return;
-        }
-
-        const prompt = await weixinMessageToPrompt(
-          msg,
-          this.config.wechat.cdnBaseUrl,
-          this.log,
-          this.config.storage.inboxDir,
-        );
-        buffer.blocks.push(...prompt);
-        buffer.contextToken = contextToken;
-        buffer.lastUpdatedAt = Date.now();
-        this.resetBufferTimer(userId);
-
-        this.log(`Buffered message from ${userId}, now ${buffer.blocks.length} block(s)`);
-      });
-
-    buffer.pending.catch((err) => {
-      this.log(`Failed to buffer message from ${userId}: ${String(err)}`);
-      trackException(err, "buffer", hashUserId(userId));
-    });
-  }
-
-  private resetBufferTimer(userId: string): void {
-    this.clearBufferTimer(userId);
-    this.bufferTimers.set(userId, setTimeout(() => {
-      const buffer = this.messageBuffers.get(userId);
-      if (!buffer) return;
-      this.messageBuffers.delete(userId);
-      this.bufferTimers.delete(userId);
-      this.log(`Buffer expired (timer) for ${userId}`);
-    }, BUFFER_TTL_MS));
-  }
-
-  private clearBufferTimer(userId: string): void {
-    const timer = this.bufferTimers.get(userId);
-    if (timer) {
-      clearTimeout(timer);
-      this.bufferTimers.delete(userId);
-    }
-  }
-
   private rememberActiveUser(userId: string, contextToken: string): void {
     if (!this.config.storage.stateFile) return;
     this.stateUpdate = this.stateUpdate
@@ -745,174 +577,8 @@ export class WeChatAcpBridge {
     });
   }
 
-  private async sendReply(userId: string, contextToken: string, text: string): Promise<DeliveryResult> {
-    // Serialize all replies to the same user behind a per-user promise chain so
-    // that segments from separate sendReply calls cannot interleave (issue #38).
-    // The stored link swallows errors so one failed reply doesn't break the
-    // chain for the next caller, while the returned promise still propagates.
-    const previous = this.sendChains.get(userId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => {})
-      .then(() => this.deliverReply(userId, contextToken, text));
-    this.sendChains.set(
-      userId,
-      current.catch(() => {}),
-    );
-    return current;
-  }
-
-  private async deliverReply(userId: string, contextToken: string, text: string): Promise<DeliveryResult> {
-    const segments = splitText(text, TEXT_CHUNK_LIMIT);
-    const startedAt = Date.now();
-    let segmentsSent = 0;
-    let anyFailed = false;
-
-    for (const segment of segments) {
-      // Generate one stable idempotency key per segment *before* the retry
-      // loop so that all attempts for the same segment reuse the same
-      // client_id. The iLink gateway de-duplicates by client_id, so a retry
-      // after a transient hard error (connection reset, 5xx) will not produce
-      // a duplicate message even if the first attempt was already received.
-      const segmentClientId = `wechat-acp-codex-${crypto.randomUUID()}`;
-      let sent = false;
-
-      for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
-        try {
-          await this.paceConsecutiveSend(userId);
-          await sendTextMessage(
-            userId,
-            segment,
-            {
-              baseUrl: this.tokenData!.baseUrl,
-              token: this.tokenData!.token,
-              contextToken,
-            },
-            segmentClientId,
-          );
-          sent = true;
-          break;
-        } catch (err) {
-          trackException(err, "reply.segment", hashUserId(userId));
-          if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
-          }
-        }
-      }
-
-      if (sent) {
-        segmentsSent++;
-      } else {
-        // Log the drop but continue — a single failed segment must not
-        // prevent the remaining segments from being delivered.
-        anyFailed = true;
-      }
-    }
-
-    if (anyFailed) {
-      trackException(
-        new Error(
-          `deliverReply: ${segments.length - segmentsSent}/${segments.length} segment(s) failed to send after retries`,
-        ),
-        "reply",
-        hashUserId(userId),
-      );
-    }
-
-    trackEvent(
-      "reply.sent",
-      {
-        userIdHash: hashUserId(userId),
-        segments: segments.length,
-        segmentsSent,
-        chars: text.length,
-        durationMs: Date.now() - startedAt,
-      },
-      hashUserId(userId),
-    );
-
-    // Cancel typing indicator after reply is sent
-    this.cancelTypingIndicator(userId, contextToken).catch(() => {});
-
-    return deliveryResult(segments.length, segmentsSent);
-  }
-
-  /**
-   * Wait, if necessary, so that consecutive text messages to the same user
-   * are issued at least {@link REPLY_SEND_SPACING_MS} apart. This spaces
-   * out their server-receive timestamps so WeChat preserves the order the
-   * bridge sent them in, instead of racing and delivering them reversed
-   * (issue #38). Sends to different users are tracked independently and do
-   * not delay each other.
-   */
-  private async paceConsecutiveSend(userId: string): Promise<void> {
-    const last = this.lastSendAt.get(userId);
-    const now = Date.now();
-    if (last !== undefined) {
-      const wait = REPLY_SEND_SPACING_MS - (now - last);
-      if (wait > 0) {
-        await new Promise((resolve) => setTimeout(resolve, wait));
-      }
-    }
-    this.lastSendAt.set(userId, Date.now());
-  }
-
-  private async cancelTypingIndicator(userId: string, contextToken: string): Promise<void> {
-    const ticket = await this.getTypingTicket(userId, contextToken);
-    if (!ticket) return;
-
-    await sendTyping({
-      baseUrl: this.tokenData!.baseUrl,
-      token: this.tokenData!.token,
-      body: {
-        ilink_user_id: userId,
-        typing_ticket: ticket,
-        status: TypingStatus.CANCEL,
-      },
-    });
-  }
-
-  private async sendTypingIndicator(userId: string, contextToken: string): Promise<void> {
-    try {
-      const ticket = await this.getTypingTicket(userId, contextToken);
-      if (!ticket) return;
-
-      await sendTyping({
-        baseUrl: this.tokenData!.baseUrl,
-        token: this.tokenData!.token,
-        body: {
-          ilink_user_id: userId,
-          typing_ticket: ticket,
-          status: TypingStatus.TYPING,
-        },
-      });
-    } catch {
-      // Typing is best-effort
-    }
-  }
-
-  private async getTypingTicket(userId: string, contextToken: string): Promise<string | null> {
-    const cached = this.typingTickets.get(userId);
-    if (cached && cached.expiresAt > Date.now()) return cached.ticket;
-
-    try {
-      const resp = await getConfig({
-        baseUrl: this.tokenData!.baseUrl,
-        token: this.tokenData!.token,
-        ilinkUserId: userId,
-        contextToken,
-      });
-
-      if (resp.typing_ticket) {
-        this.typingTickets.set(userId, {
-          ticket: resp.typing_ticket,
-          expiresAt: Date.now() + 24 * 60 * 60_000, // 24h cache
-        });
-        return resp.typing_ticket;
-      }
-    } catch {
-      // Not critical
-    }
-    return null;
+  private sendReply(userId: string, contextToken: string, text: string): Promise<DeliveryResult> {
+    return this.reply.send(userId, contextToken, text);
   }
 
   private previewMessage(msg: WeixinMessage): string {
@@ -985,168 +651,6 @@ export class WeChatAcpBridge {
     return aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
   }
 
-  private formatAcpConfigList(userId: string): string {
-    const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
-    if (!configOptions) {
-      return this.formatAcpConfigUsage(
-        "No active ACP session for this chat yet. Send a normal message first.",
-      );
-    }
-    if (configOptions.length === 0) {
-      return this.formatAcpConfigUsage(
-        "The current ACP agent does not expose any configurable session options.",
-      );
-    }
-
-    const lines: string[] = [];
-    lines.push("⚙️ **ACP Session Config**");
-    lines.push("━━━━━━━━━━━━━━━━");
-
-    for (const option of configOptions) {
-      lines.push("");
-      lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
-      lines.push(`   • Current: ${this.describeCurrentConfigValue(option)}`);
-      if (option.type === "select") {
-        lines.push(`   • Options: ${this.listConfigOptionChoices(option).join(" | ")}`);
-      } else if (option.type === "boolean") {
-        lines.push(`   • Options: true | false`);
-      }
-    }
-
-    lines.push("");
-    lines.push("━━━━━━━━━━━━━━━━");
-    lines.push("💡 **Usage**");
-    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}${this.aliasHint(ACP_CONFIG_COMMAND)}`);
-    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
-    return lines.join("\n");
-  }
-
-  private formatAcpConfigUsage(error?: string): string {
-    const lines: string[] = [];
-    if (error) {
-      lines.push(`⚠️ ${error}`);
-      lines.push("");
-    }
-    lines.push("💡 **Usage**");
-    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}${this.aliasHint(ACP_CONFIG_COMMAND)}`);
-    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
-    return lines.join("\n");
-  }
-
-  private describeCurrentConfigValue(option: acp.SessionConfigOption): string {
-    if (option.type === "boolean") {
-      return option.currentValue ? "true" : "false";
-    }
-
-    const current = this.findConfigOptionChoice(option, option.currentValue);
-    return current ? this.describeConfigChoice(current) : option.currentValue;
-  }
-
-  private listConfigOptionChoices(option: acp.SessionConfigOption): string[] {
-    if (option.type !== "select") return [];
-    return this.flattenSelectOptions(option.options).map((choice) => this.describeConfigChoice(choice));
-  }
-
-  private resolveAcpConfigValue(
-    userId: string,
-    configId: string,
-    rawValue: string,
-  ): { rawValue: string | boolean; displayValue: string } {
-    const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
-    if (!configOptions) {
-      throw new Error("No active ACP session for this chat yet. Send a normal message first.");
-    }
-
-    const option = configOptions.find((candidate) => candidate.id === configId);
-    if (!option) {
-      throw new Error(`Unknown ACP config option: ${configId}`);
-    }
-
-    if (option.type === "boolean") {
-      const normalized = rawValue.trim().toLowerCase();
-      if (["true", "on", "1", "yes"].includes(normalized)) {
-        return { rawValue: true, displayValue: "true" };
-      }
-      if (["false", "off", "0", "no"].includes(normalized)) {
-        return { rawValue: false, displayValue: "false" };
-      }
-      throw new Error(`Invalid boolean value for ${configId}: ${rawValue}`);
-    }
-
-    const candidates = this.flattenSelectOptions(option.options).filter((choice) =>
-      this.configChoiceAliases(choice).has(rawValue.trim().toLowerCase())
-    );
-    if (candidates.length === 0) {
-      throw new Error(
-        `Invalid value for ${configId}: ${rawValue}. Options: ${this.listConfigOptionChoices(option).join(", ")}`,
-      );
-    }
-    if (candidates.length > 1) {
-      throw new Error(`Ambiguous value for ${configId}: ${rawValue}`);
-    }
-
-    const match = candidates[0]!;
-    return {
-      rawValue: match.value,
-      displayValue: this.describeConfigChoice(match),
-    };
-  }
-
-  private flattenSelectOptions(
-    options: acp.SessionConfigSelect["options"],
-  ): acp.SessionConfigSelectOption[] {
-    if (options.length === 0) return [];
-
-    const first = options[0];
-    if (first && "value" in first) {
-      return options as acp.SessionConfigSelectOption[];
-    }
-
-    return (options as acp.SessionConfigSelectGroup[]).flatMap((group) => group.options);
-  }
-
-  private findConfigOptionChoice(
-    option: acp.SessionConfigSelect,
-    rawValue: string,
-  ): acp.SessionConfigSelectOption | undefined {
-    return this.flattenSelectOptions(option.options).find((choice) => choice.value === rawValue);
-  }
-
-  private configChoiceAliases(choice: acp.SessionConfigSelectOption): Set<string> {
-    const aliases = new Set<string>();
-    aliases.add(choice.value.toLowerCase());
-    aliases.add(choice.name.toLowerCase());
-
-    const compactName = choice.name.toLowerCase().replace(/\s+/g, "-");
-    aliases.add(compactName);
-
-    const tail = this.extractConfigValueTail(choice.value);
-    if (tail) aliases.add(tail.toLowerCase());
-
-    return aliases;
-  }
-
-  private describeConfigChoice(choice: acp.SessionConfigSelectOption): string {
-    const tail = this.extractConfigValueTail(choice.value);
-    if (tail && tail.toLowerCase() !== choice.name.toLowerCase()) {
-      return tail;
-    }
-    return choice.value;
-  }
-
-  private extractConfigValueTail(value: string): string {
-    const hashIndex = value.lastIndexOf("#");
-    if (hashIndex >= 0 && hashIndex < value.length - 1) {
-      return value.slice(hashIndex + 1);
-    }
-
-    const slashIndex = value.lastIndexOf("/");
-    if (slashIndex >= 0 && slashIndex < value.length - 1) {
-      return value.slice(slashIndex + 1);
-    }
-
-    return value;
-  }
 }
 
 function sanitizeStateError(err: unknown): Error {

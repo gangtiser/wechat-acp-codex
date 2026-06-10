@@ -138,25 +138,6 @@ export interface SendMessageReq {
   msg?: WeixinMessage;
 }
 
-export interface GetUploadUrlReq {
-  filekey?: string;
-  media_type?: number;
-  to_user_id?: string;
-  rawsize?: number;
-  rawfilemd5?: string;
-  filesize?: number;
-  thumb_rawsize?: number;
-  thumb_rawfilemd5?: string;
-  thumb_filesize?: number;
-  no_need_thumb?: boolean;
-  aeskey?: string;
-}
-
-export interface GetUploadUrlResp {
-  upload_param?: string;
-  thumb_upload_param?: string;
-}
-
 export interface SendTypingReq {
   ilink_user_id: string;
   typing_ticket: string;
