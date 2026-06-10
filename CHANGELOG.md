@@ -15,6 +15,7 @@
 - Tooling: `npm test` now type-checks `tests/` first (`tsconfig.tests.json`, noEmit); add ESLint with only `no-floating-promises` + `no-misused-promises` (`npm run lint`, also in CI); enable `noUnusedLocals`.
 - Refactor: split `bridge.ts` (1100+ lines) into focused modules with no behavior change — `weixin/reply.ts` (`ReplyPipeline`: per-user send serialization, segment retries, pacing, typing), `message-buffer.ts` (`MessageBufferManager`: `/acp-prompt-start…done` compose), and `acp/config-options.ts` (pure `/acp-config` formatting + value resolution, now unit-tested). The bridge keeps routing/wiring only.
 - Remove the never-wired CDN upload path (`getUploadUrl`, `uploadToCdn`, `encryptAesEcb`, and the `GetUploadUrl*` types). Not part of the public package API (`src/index.ts` only exports the bridge + config helpers).
+- Normalize the repo to LF line endings via `.gitattributes` (`* text=auto eol=lf`) and a one-time renormalize. Ends the upstream-CRLF era where `git diff --check` flagged every added line in CRLF files.
 
 ## 0.8.3
 
