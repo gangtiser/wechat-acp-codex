@@ -66,3 +66,37 @@ test("cancelCurrent drain stops on ack failure: earlier dropped, failed+rest sta
   assert.deepEqual(acked, ["m1"]); // m1 acked+dropped; stopped at m2
   assert.deepEqual(session.queue.map((p) => p.inboxId), ["m2", "m3"]); // un-acked tail stays queued for retry
 });
+
+test("drain snapshots the queue so a message enqueued mid-drain is not dropped (#6)", async () => {
+  // The real race is processQueue shifting session.queue while drain awaits an
+  // ack. Modelled here by mutating the live queue from inside onTurnSettled:
+  // the snapshot (splice) must mean only the items present at drain time are
+  // dropped, and anything pushed concurrently survives.
+  const acked: string[] = [];
+  const session = {
+    userId: "u", processing: false, lastActivity: 0,
+    queue: [{ prompt: [], contextToken: "ct", inboxId: "m1" }] as Array<{
+      prompt: unknown[]; contextToken: string; inboxId: string;
+    }>,
+  };
+  const mgr = new SessionManager({
+    agentCommand: "x", agentArgs: [], agentCwd: ".", idleTimeoutMs: 0,
+    maxConcurrentUsers: 1, showThoughts: false, log: () => {},
+    onReply: async () => ({ total: 0, sent: 0, allSent: true }),
+    sendTyping: async () => {},
+    onTurnSettled: async (inboxId) => {
+      if (inboxId === "m1") {
+        session.queue.push({ prompt: [], contextToken: "ct", inboxId: "m2" });
+      }
+      await new Promise((r) => setTimeout(r, 0));
+      acked.push(inboxId);
+    },
+  });
+  (mgr as unknown as { sessions: Map<string, unknown> }).sessions.set("u", session);
+
+  const res = await mgr.cancelCurrent("u", { drainQueue: true });
+
+  assert.equal(res.droppedQueueCount, 1); // only m1 (the snapshot), NOT m2
+  assert.deepEqual(acked, ["m1"]);
+  assert.deepEqual(session.queue.map((p) => p.inboxId), ["m2"]); // survives the drain
+});

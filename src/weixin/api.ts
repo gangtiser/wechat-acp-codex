@@ -15,16 +15,26 @@ import type {
 
 const CHANNEL_VERSION = "1.0.2";
 
-function randomWechatUin(): string {
+// The long-poll duration is the server's (learned via longpolling_timeout_ms).
+// The client must abort the socket only AFTER that window plus a margin —
+// aborting right at the boundary would discard the batch the server was about
+// to return and force a redundant re-poll (added latency, no lost messages).
+const GETUPDATES_LONG_POLL_MS = 35_000;
+const GETUPDATES_ABORT_MARGIN_MS = 10_000;
+
+// A WeChat UIN identifies the client, not the request, so compute it once per
+// process and reuse it. A fresh value per request is neither meaningful nor
+// free, and could defeat any gateway-side session affinity.
+const WECHAT_UIN = ((): string => {
   const uint32 = crypto.randomBytes(4).readUInt32BE(0);
   return Buffer.from(String(uint32), "utf-8").toString("base64");
-}
+})();
 
 function buildHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     AuthorizationType: "ilink_bot_token",
-    "X-WECHAT-UIN": randomWechatUin(),
+    "X-WECHAT-UIN": WECHAT_UIN,
   };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
@@ -87,7 +97,7 @@ export async function getUpdates(params: {
       "ilink/bot/getupdates",
       { get_updates_buf: params.get_updates_buf },
       params.token,
-      params.timeoutMs ?? 38_000,
+      (params.timeoutMs ?? GETUPDATES_LONG_POLL_MS) + GETUPDATES_ABORT_MARGIN_MS,
     );
   } catch (err) {
     // Long-poll client-side timeout just means "no new messages this cycle".

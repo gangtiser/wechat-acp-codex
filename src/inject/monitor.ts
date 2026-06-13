@@ -89,7 +89,10 @@ export class InjectionMonitor {
     try {
       const job = await this.readJob(processingPath);
       await this.opts.onMessage(job);
-      await fs.rename(processingPath, path.join(this.dir("done"), file));
+      // Done — drop the file. Inject jobs are at-least-once with no dedup, so
+      // there is no replay credential to retain; keeping them would grow the
+      // dir unbounded under cron/automation use.
+      await fs.rm(processingPath, { force: true });
       this.opts.log(`[inject] processed ${job.id} for ${job.target}`);
     } catch (err) {
       const failedPath = path.join(this.dir("failed"), file);
@@ -103,8 +106,10 @@ export class InjectionMonitor {
         processingPath,
         JSON.stringify(failure, null, 2) + "\n",
         "utf-8",
-      ).catch(() => {});
-      await fs.rename(processingPath, failedPath).catch(() => {});
+      ).catch((e) => this.opts.log(`[inject] could not write failure for ${file}: ${String(e)}`));
+      await fs.rename(processingPath, failedPath).catch((e) =>
+        this.opts.log(`[inject] could not move ${file} to failed/ (left in processing/): ${String(e)}`),
+      );
       this.opts.log(`[inject] failed ${file}: ${String(err)}`);
     }
   }
@@ -131,7 +136,6 @@ export class InjectionMonitor {
     const dirs = [
       this.dir("pending"),
       this.dir("processing"),
-      this.dir("done"),
       this.dir("failed"),
     ];
     await Promise.all(dirs.map(async (dir) => {
@@ -151,15 +155,19 @@ export class InjectionMonitor {
 
     for (const file of files) {
       const from = path.join(processingDir, file);
-      const to = path.join(this.dir("pending"), file);
+      // A file stranded in processing/ crashed mid-handling: we cannot tell
+      // whether onMessage already ran (its side effects landed) or not, and
+      // inject has no dedup. Re-queueing would risk executing the job twice, so
+      // park it in failed/ for inspection instead of silently re-running it.
+      const to = path.join(this.dir("failed"), file);
       await fs.rename(from, to).catch((err) => {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       });
-      this.opts.log(`[inject] recovered stale processing job ${file}`);
+      this.opts.log(`[inject] stale processing job ${file} parked in failed/ (not auto-retried to avoid double execution)`);
     }
   }
 
-  private dir(name: "pending" | "processing" | "done" | "failed"): string {
+  private dir(name: "pending" | "processing" | "failed"): string {
     return path.join(this.opts.injectDir, name);
   }
 }

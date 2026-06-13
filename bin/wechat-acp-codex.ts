@@ -183,14 +183,27 @@ function parseArgs(argv: string[]): {
     i = 2;
   }
 
+  // Consume the value token for a flag, rejecting a missing value (flag at the
+  // end of argv) or a value that is actually the next flag (e.g. `--agent
+  // --daemon` would otherwise silently swallow --daemon and disable it). Pass
+  // { allowDash: true } for free-form values that may legitimately begin "-".
+  const takeValue = (flag: string, opts?: { allowDash?: boolean }): string => {
+    const v: string | undefined = args[++i];
+    if (v === undefined || (!opts?.allowDash && v.startsWith("-"))) {
+      console.error(`Error: ${flag} requires a value`);
+      process.exit(1);
+    }
+    return v;
+  };
+
   while (i < args.length) {
     const arg = args[i];
     switch (arg) {
       case "--agent":
-        result.agent = args[++i];
+        result.agent = takeValue("--agent");
         break;
       case "--cwd":
-        result.cwd = args[++i];
+        result.cwd = takeValue("--cwd");
         break;
       case "--login":
         result.forceLogin = true;
@@ -199,37 +212,37 @@ function parseArgs(argv: string[]): {
         result.daemon = true;
         break;
       case "--config":
-        result.configFile = args[++i];
+        result.configFile = takeValue("--config");
         break;
       case "--instance":
-        result.instance = args[++i];
+        result.instance = takeValue("--instance");
         break;
       case "--inbox-dir":
-        result.inboxDir = args[++i];
+        result.inboxDir = takeValue("--inbox-dir");
         break;
       case "--no-inbox":
         result.disableInbox = true;
         break;
       case "--idle-timeout":
-        result.idleTimeout = parseInt(args[++i], 10);
+        result.idleTimeout = parseInt(takeValue("--idle-timeout"), 10);
         break;
       case "--max-sessions":
-        result.maxSessions = parseInt(args[++i], 10);
+        result.maxSessions = parseInt(takeValue("--max-sessions"), 10);
         break;
       case "--show-thoughts":
         result.showThoughts = true;
         break;
       case "--text":
-        result.injectText = args[++i];
+        result.injectText = takeValue("--text", { allowDash: true });
         break;
       case "--file":
-        result.injectFile = args[++i];
+        result.injectFile = takeValue("--file");
         break;
       case "--to":
-        result.injectTo = args[++i];
+        result.injectTo = takeValue("--to");
         break;
       case "--context-token":
-        result.injectContextToken = args[++i];
+        result.injectContextToken = takeValue("--context-token");
         break;
       case "--hide-thoughts":
         result.hideThoughts = true;
@@ -241,7 +254,7 @@ function parseArgs(argv: string[]): {
         result.stripMarkdown = false;
         break;
       case "--owner":
-        result.owner = args[++i];
+        result.owner = takeValue("--owner");
         break;
       case "--allow-first":
         result.allowFirst = true;
@@ -356,7 +369,8 @@ function daemonize(config: WeChatAcpConfig): void {
   const out = fs.openSync(logFile, "a");
   const err = fs.openSync(logFile, "a");
 
-  // Re-run ourselves with --no-daemon (internal flag) as a detached process
+  // Re-run ourselves detached, with --daemon stripped and WECHAT_CODEX_DAEMON=1
+  // set so the child runs the bridge in the foreground.
   const args = process.argv.slice(1).filter((a) => a !== "--daemon");
   const child = spawn(process.execPath, args, {
     detached: true,
@@ -553,7 +567,14 @@ async function main(): Promise<void> {
     }
     config.session.idleTimeoutMs = args.idleTimeout * 60_000;
   }
-  if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
+  if (args.maxSessions !== undefined) {
+    if (!Number.isInteger(args.maxSessions) || args.maxSessions < 1) {
+      console.error("Error: invalid --max-sessions value");
+      console.error("Use a positive integer (at least 1).");
+      process.exit(1);
+    }
+    config.session.maxConcurrentUsers = args.maxSessions;
+  }
   if (args.showThoughts) config.agent.showThoughts = true;
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;

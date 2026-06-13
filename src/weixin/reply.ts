@@ -33,8 +33,9 @@ export interface ReplyAuth {
 }
 
 export class ReplyPipeline {
-  // Per-user typing ticket cache
-  private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
+  // Per-user typing ticket cache (one entry per user; refreshed when the
+  // user's contextToken changes so a stale ticket isn't reused for the full TTL)
+  private typingTickets = new Map<string, { ticket: string; contextToken: string; expiresAt: number }>();
   // Timestamp (ms) at which the last text message was issued to each user,
   // used to pace consecutive sends so they don't race and arrive reordered.
   private lastSendAt = new Map<string, number>();
@@ -201,7 +202,9 @@ export class ReplyPipeline {
 
   private async getTypingTicket(userId: string, contextToken: string): Promise<string | null> {
     const cached = this.typingTickets.get(userId);
-    if (cached && cached.expiresAt > Date.now()) return cached.ticket;
+    if (cached && cached.contextToken === contextToken && cached.expiresAt > Date.now()) {
+      return cached.ticket;
+    }
 
     try {
       const auth = this.opts.auth();
@@ -215,6 +218,7 @@ export class ReplyPipeline {
       if (resp.typing_ticket) {
         this.typingTickets.set(userId, {
           ticket: resp.typing_ticket,
+          contextToken,
           expiresAt: Date.now() + TYPING_TICKET_TTL_MS,
         });
         return resp.typing_ticket;

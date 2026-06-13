@@ -52,3 +52,19 @@ test("getUpdates maps a long-poll timeout to an empty batch", async () => {
     assert.deepEqual(resp, { ret: 0, msgs: [] });
   });
 });
+
+test("X-WECHAT-UIN is stable across requests (identifies the client, not the request)", async () => {
+  const uins: string[] = [];
+  const capture: typeof fetch = async (_url, init) => {
+    uins.push((init?.headers as Record<string, string>)["X-WECHAT-UIN"]);
+    return jsonResponse({ ret: 0, msgs: [] });
+  };
+  await withFetch(capture, async () => {
+    await getUpdates({ baseUrl: "http://fake", get_updates_buf: "" });
+    await getUpdates({ baseUrl: "http://fake", get_updates_buf: "" });
+  });
+
+  assert.equal(uins.length, 2);
+  assert.ok(uins[0], "UIN header is present");
+  assert.equal(uins[0], uins[1], "same UIN reused across requests");
+});

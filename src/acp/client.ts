@@ -61,11 +61,18 @@ export class WeChatAcpClient implements acp.Client {
   async requestPermission(
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
-    // Auto-allow: find first "allow" option
+    // Auto-allow: prefer an explicit allow option, else the first offered one.
     const allowOpt = params.options.find(
       (o) => o.kind === "allow_once" || o.kind === "allow_always",
     );
-    const optionId = allowOpt?.optionId ?? params.options[0]?.optionId ?? "allow";
+    const optionId = allowOpt?.optionId ?? params.options[0]?.optionId;
+
+    // No options to choose from — cancel rather than invent an optionId the
+    // agent never advertised (ACP requires a real option id for "selected").
+    if (optionId === undefined) {
+      this.opts.log(`[permission] no options offered for ${params.toolCall?.title ?? "unknown"}; cancelling`);
+      return { outcome: { outcome: "cancelled" } };
+    }
 
     this.opts.log(`[permission] auto-allowed: ${params.toolCall?.title ?? "unknown"} → ${optionId}`);
 

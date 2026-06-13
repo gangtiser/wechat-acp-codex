@@ -157,7 +157,7 @@ export class WeChatAcpBridge {
 
     // Replay un-acked inbox messages from a previous run (at-least-once). Seed
     // the dedup set first so the poll loop won't re-process the same ids.
-    const pendingInbox = await listPending(this.config.storage.dir);
+    const pendingInbox = await listPending(this.config.storage.dir, this.log);
     for (const rec of pendingInbox) {
       let bumped: InboxRecord | null;
       try {
@@ -183,7 +183,7 @@ export class WeChatAcpBridge {
         ).catch(() => {}); // best-effort; contextToken may be stale
         continue;
       }
-      this.seenInbox.add(rec.id);
+      this.markSeen(rec.id);
       this.chainEnqueue(rec.userId, () =>
         this.enqueueMessage(rec.msg, rec.userId, rec.contextToken, rec.id),
       ).catch((err) => {

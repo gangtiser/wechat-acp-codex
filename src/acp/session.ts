@@ -80,6 +80,10 @@ export class SessionManager {
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private opts: SessionManagerOpts;
   private aborted = false;
+  // Number of sessions currently being created (inside `await createSession`),
+  // counted against the cap so concurrent new-user enqueues don't all skip
+  // eviction and overshoot maxConcurrentUsers.
+  private creating = 0;
 
   constructor(opts: SessionManagerOpts) {
     this.opts = opts;
@@ -114,13 +118,26 @@ export class SessionManager {
     let session = this.sessions.get(userId);
 
     if (!session) {
-      if (this.sessions.size >= this.opts.maxConcurrentUsers) {
-        // Evict oldest idle session
-        this.evictOldest();
+      // Count in-flight creations too: different new users can sit inside the
+      // `await createSession` below concurrently, and each must see the others
+      // so they don't all skip eviction and blow past the cap.
+      if (this.sessions.size + this.creating >= this.opts.maxConcurrentUsers) {
+        if (!this.evictOldest()) {
+          // Every existing session is busy, so nothing is evictable; create
+          // anyway (a message must never be dropped) but surface the overage.
+          this.opts.log(
+            `[${userId}] all ${this.opts.maxConcurrentUsers} sessions busy — temporarily exceeding the cap`,
+          );
+        }
       }
 
-      session = await this.createSession(userId, message.contextToken);
-      this.sessions.set(userId, session);
+      this.creating++;
+      try {
+        session = await this.createSession(userId, message.contextToken);
+        this.sessions.set(userId, session);
+      } finally {
+        this.creating--;
+      }
     }
 
     // Always update contextToken to the latest
@@ -201,13 +218,24 @@ export class SessionManager {
     let droppedQueueCount = 0;
     if (opts?.drainQueue && session.queue.length > 0) {
       const err = new Error("Cancelled before queued message was processed");
-      while (session.queue.length > 0) {
-        const pending = session.queue[0]!;
+      // Atomically take the queued items into a local snapshot so we don't race
+      // the concurrent processQueue loop, which shifts from this same array on
+      // every awaited turn. Items already shifted into an in-flight turn aren't
+      // here — they settle through processQueue's own finally.
+      const drained = session.queue.splice(0);
+      for (let i = 0; i < drained.length; i++) {
+        const pending = drained[i]!;
         if (pending.inboxId) {
-          // Delete the pending file FIRST; may throw -> propagate (don't remove it).
-          await this.opts.onTurnSettled?.(pending.inboxId, true);
+          try {
+            // Ack (delete the pending file) BEFORE dropping. On failure, put the
+            // un-acked item plus the rest back on the live queue and rethrow, so
+            // the stuck cursor retries them instead of losing them (#11).
+            await this.opts.onTurnSettled?.(pending.inboxId, true);
+          } catch (ackErr) {
+            session.queue.unshift(...drained.slice(i));
+            throw ackErr;
+          }
         }
-        session.queue.shift();
         droppedQueueCount++;
         pending.completion?.reject(err);
       }
@@ -434,7 +462,8 @@ export class SessionManager {
     }
   }
 
-  private evictOldest(): void {
+  /** @returns true iff an idle session was found and evicted. */
+  private evictOldest(): boolean {
     let oldest: { userId: string; lastActivity: number } | null = null;
     for (const [userId, session] of this.sessions) {
       if (!session.processing && (!oldest || session.lastActivity < oldest.lastActivity)) {
@@ -448,8 +477,10 @@ export class SessionManager {
         this.rejectQueuedCompletions(session, new Error("Session evicted before queued message was processed"));
         killAgent(session.agentInfo.process);
         this.sessions.delete(oldest.userId);
+        return true;
       }
     }
+    return false;
   }
 
   private rejectQueuedCompletions(session: UserSession, err: unknown): void {

@@ -212,3 +212,31 @@ test("two sequential flushes are delivered in order (second waits for first)", a
 
   assert.deepEqual(order, ["chunk A", "chunk B"], "second message must arrive after first");
 });
+
+test("requestPermission selects the allow option the agent offered", async () => {
+  const client = makeClient({});
+  const resp = await client.requestPermission({
+    options: [
+      { optionId: "deny-1", kind: "reject_once", name: "Deny" },
+      { optionId: "allow-1", kind: "allow_once", name: "Allow" },
+    ],
+    sessionId: "s1",
+    toolCall: { title: "ls" },
+  } as never);
+
+  assert.equal(resp.outcome.outcome, "selected");
+  assert.equal((resp.outcome as { optionId: string }).optionId, "allow-1");
+});
+
+test("requestPermission cancels when the agent offers no options", async () => {
+  // Must NOT invent an optionId the agent never advertised; ACP requires a
+  // real option id for a "selected" outcome.
+  const client = makeClient({});
+  const resp = await client.requestPermission({
+    options: [],
+    sessionId: "s1",
+    toolCall: { title: "rm -rf /" },
+  } as never);
+
+  assert.equal(resp.outcome.outcome, "cancelled");
+});

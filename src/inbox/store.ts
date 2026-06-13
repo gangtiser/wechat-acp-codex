@@ -53,8 +53,11 @@ export async function settleInbox(storageDir: string, id: string, ok: boolean): 
   if (ok) await ackPending(storageDir, id);
 }
 
-/** All pending records, oldest first (by ts). Skips corrupt files. */
-export async function listPending(storageDir: string): Promise<InboxRecord[]> {
+/** All pending records, oldest first (by ts). Skips (and parks) corrupt files. */
+export async function listPending(
+  storageDir: string,
+  log?: (msg: string) => void,
+): Promise<InboxRecord[]> {
   const dir = pendingDir(storageDir);
   const files = await fs.readdir(dir).catch((e) => {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return [] as string[];
@@ -65,8 +68,12 @@ export async function listPending(storageDir: string): Promise<InboxRecord[]> {
     if (!f.endsWith(".json")) continue;
     try {
       out.push(JSON.parse(await fs.readFile(path.join(dir, f), "utf-8")) as InboxRecord);
-    } catch {
-      // skip corrupt
+    } catch (e) {
+      // A corrupt (e.g. half-written) file can never be parsed or replayed.
+      // Surface it and move it aside so it stops being silently re-read every
+      // start instead of lingering as an invisible orphan.
+      log?.(`inbox: skipping corrupt pending file ${f}: ${String(e)}`);
+      await fs.rename(path.join(dir, f), path.join(dir, `${f}.corrupt`)).catch(() => {});
     }
   }
   return out.sort((a, b) => a.ts.localeCompare(b.ts));

@@ -30,6 +30,21 @@ test("write/list/ack round-trip, sorted by ts", async () => {
   await ackPending(dir, "missing"); // safe no-op
 });
 
+test("listPending skips, logs, and parks a corrupt pending file", async () => {
+  const dir = tmp();
+  await writePending(dir, rec("good", "2026-01-01T00:00:00Z"));
+  const pending = path.join(dir, "queue", "pending");
+  fs.writeFileSync(path.join(pending, "bad.json"), "{ half-written"); // corrupt
+
+  const logs: string[] = [];
+  const recs = await listPending(dir, (m) => logs.push(m));
+
+  assert.deepEqual(recs.map((r) => r.id), ["good"]); // valid record still returned
+  assert.ok(logs.some((m) => m.includes("corrupt") && m.includes("bad.json")), "corrupt file surfaced");
+  assert.ok(fs.existsSync(path.join(pending, "bad.json.corrupt")), "parked aside");
+  assert.ok(!fs.existsSync(path.join(pending, "bad.json")), "no longer re-read as .json");
+});
+
 test("settleInbox acks only when ok=true", async () => {
   const dir = tmp();
   await writePending(dir, rec("k", "t"));

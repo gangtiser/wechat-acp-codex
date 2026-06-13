@@ -1,10 +1,9 @@
 /**
  * Telemetry is disabled in wechat-acp-codex. These are no-op stubs that keep the
  * public surface stable so call sites do not change. No network, no Azure,
- * no applicationinsights dependency. hashUserId remains a pure local hash in
- * case any non-telemetry caller relies on it.
+ * no applicationinsights dependency. hashUserId returns a constant — telemetry
+ * is off, so there is nothing to hash and no reason to spend a sha256 per event.
  */
-import crypto from "node:crypto";
 
 export type EventName =
   | "app.start" | "app.stop" | "login.success" | "login.failure"
@@ -29,9 +28,10 @@ export function trackException(_err: unknown, _area: string, _sessionId?: string
   /* no-op */
 }
 
-export function hashUserId(userId: string): string {
-  if (!userId) return "";
-  return crypto.createHash("sha256").update("wechat-acp-codex").update(userId).digest("hex").slice(0, 16);
+export function hashUserId(_userId: string): string {
+  // Telemetry is a no-op, so there is nothing to hash for and no reason to burn
+  // a sha256 per event. Kept on the public surface so call sites don't change.
+  return "";
 }
 
 export async function shutdownTelemetry(): Promise<void> {

@@ -16,6 +16,8 @@ export function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
  * The key can be either:
  *   - base64 → 16 raw bytes (use directly)
  *   - base64 → 32 hex chars → parse hex → 16 bytes
+ * Any other length returns null so the caller skips the media, rather than
+ * truncating an unexpected key to 16 bytes and decrypting to garbage.
  */
 export function parseAesKey(media: CDNMedia): Buffer | null {
   const raw = media.aes_key;
@@ -29,7 +31,7 @@ export function parseAesKey(media: CDNMedia): Buffer | null {
       return Buffer.from(hexStr, "hex");
     }
   }
-  return decoded.subarray(0, 16);
+  return null;
 }
 
 export async function downloadAndDecrypt(

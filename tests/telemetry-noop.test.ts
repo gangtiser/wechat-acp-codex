@@ -10,12 +10,11 @@ test("network telemetry functions are no-ops and never throw", async () => {
   await assert.doesNotReject(telemetry.shutdownTelemetry());
 });
 
-test("hashUserId stays a pure, stable, non-reversible hash", () => {
+test("hashUserId is a no-op stub that never computes a hash", () => {
+  // Telemetry is disabled, so it returns a constant (no sha256) and never echoes
+  // the raw id back.
   assert.equal(telemetry.hashUserId(""), "");
-  const h = telemetry.hashUserId("user@im.wechat");
-  assert.match(h, /^[0-9a-f]{16}$/);
-  assert.equal(h, telemetry.hashUserId("user@im.wechat"));
-  assert.notEqual(h, "user@im.wechat");
+  assert.equal(telemetry.hashUserId("user@im.wechat"), "");
 });
 
 test("applicationinsights is not a dependency (Azure removed)", () => {
