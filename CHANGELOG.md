@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.1
+
+A hardening release: correctness, delivery, and inject-reliability fixes found in a full-codebase review. No new features and no API changes.
+
+- Fix the startup replay path bypassing the dedup cap: it added inbox ids straight to `seenInbox` instead of the capped `markSeen()`, so a backlog larger than the 1000-id cap could grow the set unbounded and later evict still-pending ids. Replay now uses the same capped path as live messages.
+- Fix a race in `/acp-cancel all`: the drain loop peeked the head of the per-user queue and `await`ed the inbox ack before shifting, so the concurrent `processQueue` loop could shift the same item mid-await and the drain would ack/drop the wrong record. The drain now takes an atomic snapshot (`splice`) of the queue; an ack failure still re-queues the un-acked tail so a stuck cursor retries it.
+- Fix `maxConcurrentUsers` being exceeded: concurrent new-user enqueues all passed the size check during the `await createSession` window, and an all-busy session set evicted nothing yet still created a session. Session creation is now counted against the cap, and an unavoidable overage is logged instead of silent.
+- Surface corrupt pending inbox files instead of silently skipping them: `listPending` now logs the file and renames it to `.corrupt` (so it stops being re-read every start) rather than leaving an invisible orphan.
+- Fix the long-poll client timeout racing the server: `getUpdates` used the same value for the server long-poll window and the client-side socket abort, so a timeout at the boundary aborted the request and discarded the batch the server was about to return (added latency, redundant re-poll). The socket abort is now the server window plus a 10s margin.
+- Invalidate the typing-ticket cache when a user's `contextToken` changes instead of reusing a ticket for the full 24h TTL (a stale ticket would make "typing…" silently stop). The cache stays bounded per user.
+- Compute `X-WECHAT-UIN` once per process instead of a fresh random value per request — a UIN identifies the client, not the request.
+- `parseAesKey` returns null on an unexpected key length instead of truncating to 16 bytes and decrypting media to garbage; the caller already skips media with no key.
+- `requestPermission` (auto-allow) returns `cancelled` when the agent offers no options instead of replying with a fabricated `"allow"` optionId the agent never advertised.
+- Inject: a finished job is deleted instead of being moved to a `done/` directory that grew without bound under cron/automation use.
+- Inject (behavior change): a job left stranded in `processing/` by a crash is now parked in `failed/` rather than re-queued. Inject has no dedup, so blindly re-running it could execute the job twice; recovery is now at-most-once. A job interrupted mid-flight is no longer auto-retried — check `failed/` and re-inject if needed.
+- Inject: secondary failures while moving a failed job to `failed/` are logged instead of swallowed.
+- CLI: validate `--max-sessions` (reject NaN/0/negative), matching `--idle-timeout`; it was silently ignored before, falling back to the default. Value flags now reject a missing value or a value that is actually the next flag (e.g. `--agent --daemon` no longer silently swallows `--daemon`); the free-form `--text` still allows a leading dash. Fix a stale comment that described a non-existent `--no-daemon` internal flag.
+- `hashUserId` no longer computes a sha256 on every telemetry call — telemetry is a disabled no-op, so the hash is unused; the no-op call surface is kept stable.
+
 ## 0.9.0
 
 - Fix a WeChat send timeout being silently treated as success: `apiPost` mapped every `AbortError` to `{ret: 0}`, so a timed-out `sendmessage` was counted as delivered and the inbox record was acked without the reply ever reaching WeChat. The timeout→empty-batch mapping now applies only to the `getupdates` long-poll; send/typing/config timeouts throw and go through the existing per-segment retry (same `client_id`, so the gateway de-duplicates). `sendmessage` responses are also checked for an HTTP-200 business error code (`ret`/`errcode` ≠ 0) and treated as failure.
